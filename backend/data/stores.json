@@ -1,0 +1,227 @@
+{
+  "_comment": "门店列表: 自动化依次处理所有 enabled 门店。name 用美团后台全名(英文括号), search_keyword 用于门店下拉搜索, budget_keyword 用于定位共享预算行。budget_keyword 为 null 表示未匹配到预算组(可能新店/未建预算), 运行时跳过或提示。",
+  "stores": [
+    {
+      "name": "鬼十八恐怖密室逃脱·真人NPC·沉浸解压(长宁来福士店)",
+      "search_keyword": "长宁",
+      "budget_keyword": "长宁鬼十八",
+      "enabled": true
+    },
+    {
+      "name": "鬼十八密室逃脱真人NPC(仲盛店)",
+      "search_keyword": "仲盛",
+      "budget_keyword": "仲盛鬼十八",
+      "enabled": true
+    },
+    {
+      "name": "鬼十八密室逃脱真人NPC(月亮湾店)",
+      "search_keyword": "月亮湾",
+      "budget_keyword": "鬼十八月亮湾",
+      "enabled": true
+    },
+    {
+      "name": "迷之好玩·魔法互动·机械密室(正大店)",
+      "search_keyword": "正大",
+      "budget_keyword": "异时刻正大",
+      "enabled": true
+    },
+    {
+      "name": "异时刻 bb boom协作游戏运动闯关密室·聚会团建·生日派对(金鹰店)",
+      "search_keyword": "金鹰",
+      "budget_keyword": "bb金鹰",
+      "enabled": true
+    },
+    {
+      "name": "异时刻机械解谜密室·跳格子(上海长风大悦城店)",
+      "search_keyword": "长风大悦城",
+      "budget_keyword": "长风大悦城",
+      "enabled": true
+    },
+    {
+      "name": "异时刻密室·聚会团建·家庭亲子(龙湖西溪天街店)",
+      "search_keyword": "西溪",
+      "budget_keyword": "西溪异时刻",
+      "enabled": true
+    },
+    {
+      "name": "异时刻密室逃脱·解谜探案·机械剧情(金鹰店)",
+      "search_keyword": "金鹰",
+      "budget_keyword": null,
+      "enabled": true
+    },
+    {
+      "name": "异时刻密室逃脱·魔法互动·真人NPC(五角场店)",
+      "search_keyword": "五角场",
+      "budget_keyword": "五角场异时刻",
+      "enabled": true
+    },
+    {
+      "name": "异时刻密室逃脱真人NPC·跳格子·生日团建(京西大悦城店)",
+      "search_keyword": "京西大悦城",
+      "budget_keyword": "京西大悦城",
+      "enabled": true
+    },
+    {
+      "name": "bb boom运动闯关密室·聚会团建·家庭亲子(月亮湾店)",
+      "search_keyword": "月亮湾",
+      "budget_keyword": "bb月亮湾",
+      "enabled": true
+    },
+    {
+      "name": "bb boom运动闯关密室·聚会团建·生日派对(五角场万达店)",
+      "search_keyword": "五角场",
+      "budget_keyword": "bb五角场",
+      "enabled": true
+    },
+    {
+      "name": "bb boom运动闯关密室·聚会团建·生日派对·家庭亲子(徐家汇店)",
+      "search_keyword": "徐家汇",
+      "budget_keyword": "bb徐家汇",
+      "enabled": true
+    },
+    {
+      "name": "bb boom运动闯关密室·团建聚会·家庭亲子(仲盛店)",
+      "search_keyword": "仲盛",
+      "budget_keyword": "bb仲盛",
+      "enabled": true
+    },
+    {
+      "name": "bb boom运动闯关密室·团建聚会·生日派对·家庭亲子(西溪店)",
+      "search_keyword": "西溪",
+      "budget_keyword": "bb西溪",
+      "enabled": true
+    },
+    {
+      "name": "bb boom组队闯关密室·团建聚会·生日派对(正大广场店)",
+      "search_keyword": "正大",
+      "budget_keyword": null,
+      "enabled": true
+    },
+    {
+      "name": "bb boom组队闯关密室·团建聚会·生日派对(龙湖滨江天街店)",
+      "search_keyword": "滨江",
+      "budget_keyword": "滨江天街bb",
+      "enabled": true
+    },
+    {
+      "name": "bb boom组队闯关密室·团建聚会·生日派对·家庭亲子(湖滨店)",
+      "search_keyword": "湖滨",
+      "budget_keyword": "bb湖滨",
+      "enabled": true
+    },
+    {
+      "name": "bb boom组队闯关密室·团建聚会·生日派对·家庭亲子(杭州大悦城店)",
+      "search_keyword": "杭州大悦城",
+      "budget_keyword": "杭州大悦城bb",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱(静安大悦城店)",
+      "search_keyword": "静安大悦城",
+      "budget_keyword": "静安大悦城",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱(天虹店)",
+      "search_keyword": "天虹",
+      "budget_keyword": "天虹",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱(吾悦广场店)",
+      "search_keyword": "吾悦",
+      "budget_keyword": "常州吾悦",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱(金沙印象城店)",
+      "search_keyword": "金沙印象城",
+      "budget_keyword": "金沙印象城",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱·机械解谜·沉浸娱乐(人民广场迪美店)",
+      "search_keyword": "迪美",
+      "budget_keyword": "迪美异时刻",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱·解谜探案·机械剧情(湖滨店)",
+      "search_keyword": "湖滨",
+      "budget_keyword": "湖滨异时刻",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱魔法互动(瑞虹天地太阳宫店)",
+      "search_keyword": "太阳宫",
+      "budget_keyword": "太阳宫",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(新世界百货崇文店)",
+      "search_keyword": "崇文",
+      "budget_keyword": "崇文门",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(松江印象城店)",
+      "search_keyword": "松江",
+      "budget_keyword": "松江印象城",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(龙湖金沙天街店)",
+      "search_keyword": "金沙天街",
+      "budget_keyword": "金沙天街",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(熙悦天街店)",
+      "search_keyword": "熙悦天街",
+      "budget_keyword": "熙悦天街",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(徐家汇店)",
+      "search_keyword": "徐家汇",
+      "budget_keyword": "徐家汇异时刻",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(仲盛世界商城店)",
+      "search_keyword": "仲盛",
+      "budget_keyword": "仲盛异时刻",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(龙湖东吴天街店)",
+      "search_keyword": "东吴",
+      "budget_keyword": "苏州东吴",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(长楹天街店)",
+      "search_keyword": "长楹",
+      "budget_keyword": "长楹",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(外滩小南门店)",
+      "search_keyword": "小南门",
+      "budget_keyword": "小南门",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(青悦城店)",
+      "search_keyword": "青悦城",
+      "budget_keyword": "台州青悦城",
+      "enabled": true
+    },
+    {
+      "name": "Xcape异时刻密室逃脱真人NPC(龙湖房山天街店)",
+      "search_keyword": "房山",
+      "budget_keyword": "房山天街",
+      "enabled": true
+    }
+  ]
+}
