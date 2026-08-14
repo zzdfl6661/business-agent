@@ -7,22 +7,19 @@
 .workbuddy/
 
 # ---------- 环境变量与密钥（绝不上传） ----------
-backend/.env
 .env
 !*.env.example
 
 # ---------- 浏览器调试数据（含登录态/cookie，约 849MB） ----------
-backend/data/edge_debug_profile/
+data/edge_debug_profile/
 
 # ---------- 爬取的经营业务报表（敏感经营数据） ----------
-backend/data/scraped/
+data/scraped/
 
 # ---------- 向量库（本地构建，体积大） ----------
 chroma_db/
-backend/chroma_db/
 
 # ---------- 日志与运行时 ----------
-backend/logs/
 logs/
 *.log
 

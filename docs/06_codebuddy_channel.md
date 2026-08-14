@@ -37,14 +37,14 @@ Business Agent (LangGraph)
 
 | 文件 | 改动 |
 |---|---|
-| `backend/config/settings.py` | 新增 `codebuddy_base_url` / `codebuddy_model` / `codebuddy_api_key` 三项 |
-| `backend/config/llm_factory.py` | 新增 `provider == "codebuddy"` 分支（ChatOpenAI 指向 workbuddy2api） |
-| `backend/.env` | 追加 `BIZ_CODEBUDDY_*` 配置（**DeepSeek 相关行未动**） |
-| `backend/.env.example` | 同步示例 |
+| `config/settings.py` | 新增 `codebuddy_base_url` / `codebuddy_model` / `codebuddy_api_key` 三项 |
+| `config/llm_factory.py` | 新增 `provider == "codebuddy"` 分支（ChatOpenAI 指向 workbuddy2api，支持原生 tool calling；按 provider 缓存复用） |
+| `.env` | 追加 `BIZ_CODEBUDDY_*` 配置（**DeepSeek 相关行未动**） |
+| `.env.example` | 同步示例 |
 
 ## 5. 切换通道
 
-改 `backend/.env` 一行，重启后端服务（`cd backend && uvicorn main:app --reload --port 8000`）：
+改 `.env` 一行后重启后端服务（根目录 `uvicorn main:app --reload --port 8000`）；或**无需重启**：页面右上角 LLM 下拉实时切换（`POST /api/llm/switch`）：
 
 ```ini
 # 用 CodeBuddy 通道：

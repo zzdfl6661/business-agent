@@ -45,9 +45,10 @@ graph.add_conditional_edges("intent", route_after_intent, {...})
 | `deepseek`（默认） | `ChatDeepSeek`（langchain-deepseek 官方包） | 原生 tool calling 支持；模型 `deepseek-v4-flash`（env 可改，兼容 deepseek-chat） |
 | `openai` | `ChatOpenAI`（langchain-openai） | 标准 OpenAI 接入 |
 | `local` | `ChatOpenAI` 指向本地 base_url | vLLM / Ollama 等 OpenAI 兼容端点，api_key 占位即可 |
-| `mock`（自动兜底） | 自研 `MockLLM`（BaseChatModel 子类） | 无 Key 时自动启用，保证服务可启动、链路可演示 |
+| `codebuddy` | `ChatOpenAI` 指向 workbuddy2api 本地代理 | 复用 WorkBuddy 账号额度，原生 tool calling（详见 06/07 文档） |
 
 > 注意：**DeepSeek 不提供 Embedding API**，RAG 的向量化见 05_rag.md。
+> **无 Mock 红线**：未配置对应通道 Key 时 `create_llm` 直接抛 `ValueError`，不存在 mock 兜底。
 
 ## 4. 依赖安装（Python 3.13）
 
@@ -70,18 +71,18 @@ python -m venv .venv
 `config/settings.py` 基于 pydantic-settings，统一前缀 `BIZ_`，读取 `.env`：
 
 ```
-BIZ_LLM_PROVIDER      # deepseek / openai / local / mock
+BIZ_LLM_PROVIDER      # deepseek / openai / local / codebuddy（运行时切换见 /api/llm/switch）
 BIZ_DEEPSEEK_API_KEY
 BIZ_DB_HOST/PORT/USER/PASSWORD/NAME
 BIZ_VECTOR_STORE_TYPE # chroma / milvus
-BIZ_EMBEDDING_PROVIDER
-BIZ_DATA_MODE         # mock / real
+BIZ_EMBEDDING_PROVIDER # chroma_default / fastembed_bge_zh / fastembed_bge_m3 / openai
+BIZ_API_TOKEN         # API 鉴权 Token（配置后 /api/* 需 Bearer）
 ```
 
 > 配置与代码完全解耦：换模型、换库、切环境只改 `.env`，不改代码。
 
 ## 6. 安全与治理考虑
 
-- **自动化执行需显式授权**：`update_campaign_budget` 的 `confirm` 参数必须为 `True` 才真正执行，默认 dry-run 只返回执行计划，为后续「人工审批节点」预留。
+- **自动化执行需显式授权（授权制）**：`update_campaign_budget` **只生成 dry-run 执行计划**（`plan_id`，一次性 + 10 分钟 TTL，线程安全 + 审计）；真正执行只能经 `POST /api/execute/confirm`（受 API Token 鉴权保护）。LLM 永远无法自行改库。
 - **LLM 不直接操作浏览器**：强制经工具层封装，操作可审计、可回滚。
-- **可观测性**：state 中保留完整中间结果，Trace 机制记录每个节点的行为。
+- **可观测性**：request_id 贯穿日志/审计/前端 trace；`GET /api/audit` 只读查询；工具错误信息脱敏。

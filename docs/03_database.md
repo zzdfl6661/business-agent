@@ -32,7 +32,7 @@
 
 > **主数据来源**：`stores.json`（美团后台门店列表，字段 name/search_keyword/budget_keyword/enabled）。
 > 当前 37 家真实门店（鬼十八 / Xcape异时刻 / bb boom 密室逃脱品牌线），由 seed 脚本导入；
-> `BIZ_STORES_JSON` 指向文件路径，项目内保留 `backend/data/stores.json` 快照，可重复灌入。
+> `BIZ_STORES_JSON` 指向文件路径，项目内保留 `data/stores.json` 快照，可重复灌入。
 
 ### 2.2 products — 商品信息
 
@@ -88,7 +88,7 @@
 
 ## 3. 种子数据（scripts/seed.py）
 
-- **门店（真实主数据）**：读 `stores.json`（美团后台，当前 37 家密室逃脱门店），映射 `store_name/search_keyword/budget_keyword` 等字段；`BIZ_STORES_JSON` 可指向最新文件，项目内置 `backend/data/stores.json` 快照
+- **门店（真实主数据）**：读 `stores.json`（美团后台，当前 37 家密室逃脱门店），映射 `store_name/search_keyword/budget_keyword` 等字段；`BIZ_STORES_JSON` 可指向最新文件，项目内置 `data/stores.json` 快照
 - **商品**：每家 40~65 个（单人票/双人票/主题场次/团建套餐/会员储值，密室逃脱业态）
 - **订单**：最近 90 天、每店每天 20~120 单（约 23 万行，`bulk_insert_mappings` 分批）
 - **推广计划**：每家 3~4 条（美团/点评/抖音/小程序，含消耗/点击/转化）

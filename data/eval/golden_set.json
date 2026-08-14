@@ -1,0 +1,26 @@
+{
+  "_comment": "RAG 检索评测集（golden test set，#11）：每条 = 真实用户问题 → 预期命中的知识文档（source 文件名子串）。修改 embedding/切块参数后运行 scripts/eval_rag.py 验证召回是否变化。",
+  "cases": [
+    { "question": "公司有多少门店", "expected_sources": ["公司背景"] },
+    { "question": "公司总部在哪里", "expected_sources": ["公司背景"] },
+    { "question": "公司的全称是什么", "expected_sources": ["公司背景"] },
+    { "question": "公司有哪些业务板块", "expected_sources": ["公司背景"] },
+    { "question": "王志晓是负责什么的", "expected_sources": ["公司高管"] },
+    { "question": "公司高管有哪些人", "expected_sources": ["公司高管"] },
+    { "question": "店长每天需要做哪些工作", "expected_sources": ["门店日常工作"] },
+    { "question": "早班值班有什么要求", "expected_sources": ["门店日常工作"] },
+    { "question": "门店日常卫生巡检怎么做", "expected_sources": ["门店日常工作"] },
+    { "question": "员工每天上班时间是几点", "expected_sources": ["员工手册"] },
+    { "question": "忘记打卡了怎么办", "expected_sources": ["员工手册"] },
+    { "question": "新员工试用期多久", "expected_sources": ["员工手册"] },
+    { "question": "迟到怎么处理", "expected_sources": ["员工手册"] },
+    { "question": "门店晋升需要什么条件", "expected_sources": ["门店晋升制度"] },
+    { "question": "晋升考核怎么报名", "expected_sources": ["门店晋升制度"] },
+    { "question": "晋升评估流程是怎样的", "expected_sources": ["门店晋升制度"] },
+    { "question": "薪资绩效是怎么算的", "expected_sources": ["门店薪资绩效"] },
+    { "question": "绩效奖金怎么发放", "expected_sources": ["门店薪资绩效"] },
+    { "question": "工资由哪几部分构成", "expected_sources": ["门店薪资绩效"] },
+    { "question": "顾客对服务不满意怎么回访", "expected_sources": ["满意度回访话术"] },
+    { "question": "顾客投诉话术有哪些", "expected_sources": ["满意度回访话术"] }
+  ]
+}

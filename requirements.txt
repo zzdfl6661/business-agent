@@ -1,0 +1,51 @@
+# ============================================================
+# 企业经营智能决策与自动化执行 Agent 系统 — 依赖清单
+# 环境：Python 3.13 + Windows/Linux
+# 说明：LangChain 1.x / LangGraph 1.x（勿用 0.2/0.3 旧版教程 API）
+# ============================================================
+
+# ---------- Web 框架 ----------
+fastapi>=0.115
+uvicorn[standard]>=0.34
+pydantic>=2.10
+pydantic-settings>=2.7
+python-dotenv>=1.0
+python-multipart>=0.0.12    # FastAPI 文件上传（/api/rag/upload）
+
+# ---------- 数据库 ----------
+sqlalchemy==2.0.51
+pymysql>=1.1.1
+cryptography>=43.0        # MySQL8 caching_sha2_password 认证需要
+faker>=33                 # 种子数据生成
+
+# ---------- 数据分析 ----------
+pandas>=2.2.3
+numpy>=2.2
+
+# ---------- Agent 框架 ----------
+langgraph==1.2.*
+langchain==1.3.*
+langchain-core>=1.4,<2.0
+langchain-deepseek==1.1.*   # DeepSeek 官方集成（原生 tool calling）
+langchain-openai>=1.3,<2.0  # OpenAI / 本地 OpenAI 兼容端点
+langchain-community>=0.3,<1.0  # 仅用于 Document Loader（community 未跟随 1.0 版本号）
+langchain-chroma==1.1.*
+langchain-text-splitters>=1.1
+
+# ---------- RAG 向量库 ----------
+chromadb>=1.5.0
+
+# ---------- 阶段二：浏览器自动化（可先注释） ----------
+# playwright>=1.61
+
+# ---------- RAG 增强（PDF 解析 + 混合检索） ----------
+pypdf>=5.0
+rank-bm25>=0.2
+jieba>=0.42
+fastembed>=0.8
+
+# ============================================================
+# 依赖锁定（#15）：已用 uv 生成完整锁文件 requirements.lock
+#   安装锁定版本：uv pip install -r requirements.lock
+#   重新锁定：    uv pip compile requirements.txt -o requirements.lock
+# ============================================================

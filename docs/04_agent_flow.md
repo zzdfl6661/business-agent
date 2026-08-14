@@ -1,11 +1,11 @@
 # 04 · Agent 流程设计
 
-> 框架：LangGraph 1.x（StateGraph）｜ 架构：单 Agent + 多工具
+> 框架：LangGraph 1.x（StateGraph）｜ 架构：Supervisor 双 Agent（经营分析 + 知识问答）
 
 ## 1. 设计目标
 
 - 用户自然语言提问 → 自动完成「取数 → 分析 → 检索 → 诊断 → 报告」全链路
-- 链路可观测（Trace）、可扩展（节点可插拔）、可降级（Mock 模式）
+- 链路可观测（Trace + request_id）、可扩展（节点可插拔、子 Agent 可增）、仅真实链路（无 Mock 降级）
 
 ## 2. Agent State（agent/state.py）
 
@@ -94,27 +94,21 @@ update_campaign_budget(推广预算调整，需用户授权)。
 ```
 
 ```python
-REPORT_SYSTEM_PROMPT = """你是资深连锁门店运营顾问。基于【数据概览】【分析结果】【知识库建议】三部分
-生成经营诊断报告，必须包含：一、结论摘要；二、核心指标变化；三、异常原因归因（量化到贡献度）；
-四、基于知识库的优化建议；五、风险提示。使用 markdown 格式。"""
+REPORT_STRUCTURED_PROMPT = """你是经营顾问。基于【数据概览】【分析结果】【知识库建议】输出结构化经营诊断报告（JSON 五段）：
+summary(结论摘要 2-3 条) / metrics(关键指标 3-4 条) / factors(原因归因 2-3 条) / actions(建议 2-3 条) / risks(风险提示 1-2 条)。
+禁止输出内部字段名（如 reply30 等）；内容面向店长可读。"""
 ```
 
-## 7. Mock 模式下的链路（无 Key 可演示）
+> data 链路使用 `with_structured_output(ReportSections)` 结构化输出（#14），前端直接渲染五段卡片；
+> kb 链路保持口语化 markdown（流式逐 token）。
 
-- `intent_node`：MockLLM 返回无 tool_calls 的 AI 消息；同时若 `BIZ_DATA_MODE=mock`，预置一份**模拟销售数据**到 `query_result`
-- `analysis_node`：对模拟数据执行**真实 Pandas 计算**（环比/转化率/品类贡献），输出真实数值
-- `rag_node`：向量库为空时返回**内置示例知识片段**（标注来源）
-- `report_node`：MockLLM 基于输入生成**带明确占位标注的 markdown 报告**
-- 效果：无任何外部依赖即可看到「意图 → 查询(模拟) → 分析(真实计算) → 检索(示例) → 报告」全链路
-
-## 8. 演进：第二阶段 Supervisor 多 Agent
+## 7. Supervisor 多 Agent 路由（已上线）
 
 ```text
-Supervisor(调度)
- ├── 数据分析 Agent（取数 + Pandas 计算）
- ├── 知识检索 Agent（RAG + 引用溯源）
- ├── 报告生成 Agent（归因 + 建议）
- └── 执行 Agent（Playwright，需授权）
+Supervisor（确定性路由，agent/routing.py::resolve_intent）
+ ├── data_agent 经营分析 Agent（intent → tools⇄intent → analysis → rag → report）
+ ├── kb_agent 知识问答 Agent（rag → report，纯 RAG 无工具）
+ └── 路由规则：知识词优先（kb）→ 数据词（data）→ 默认 kb；门店名自动解析 store_id
 ```
 
-> 当前单 Agent 的节点边界（intent/tools/analysis/rag/report）即未来各子 Agent 的天然划分，演进成本低。
+> 各子 Agent 节点边界清晰，未来新增"执行 Agent（Playwright，需授权）"只需在 Supervisor 增加一条路由。

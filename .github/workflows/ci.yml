@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: business_agent
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+    env:
+      BIZ_DB_HOST: 127.0.0.1
+      BIZ_DB_PORT: 3306
+      BIZ_DB_USER: root
+      BIZ_DB_PASSWORD: ""
+      BIZ_DB_NAME: business_agent
+      # 无 LLM Key 时不允许对话测试（无 Mock 红线）；只跑路由/分析/契约/评测等纯逻辑单测
+      BIZ_LLM_PROVIDER: deepseek
+      BIZ_DEEPSEEK_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Lint (ruff)
+        run: |
+          ruff check config agent api tools rag database scripts tests --output-format=concise || true
+      - name: Compile check
+        run: |
+          python -c "import glob,py_compile;[py_compile.compile(f,doraise=True) for f in glob.glob('**/*.py',recursive=True) if 'chroma_db' not in f and '.venv' not in f and 'node_modules' not in f]"
+      - name: Run pytest
+        run: python -m pytest
