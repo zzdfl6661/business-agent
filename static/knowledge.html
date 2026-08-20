@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>知识库管理 · 企业经营智能决策 Agent</title>
+  <link rel="stylesheet" href="/static/workspace.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="nav-rail" aria-label="主导航">
+    <div class="brand-lockup"><div class="brand-mark">✦</div><div><strong>Business Agent</strong><small>OPERATIONS COPILOT</small></div></div>
+    <div class="nav-label">WORKSPACE</div>
+    <nav class="nav-menu">
+      <a class="nav-item" href="/"><span class="nav-icon">✦</span><span>智能对话</span></a>
+      <a class="nav-item" href="/data"><span class="nav-icon">◫</span><span>数据采集</span><span class="nav-pill">LIVE</span></a>
+      <a class="nav-item active" href="/knowledge"><span class="nav-icon">◇</span><span>知识库管理</span></a>
+      <a class="nav-item" href="/sessions"><span class="nav-icon">◷</span><span>会话记忆</span></a>
+    </nav>
+    <div class="nav-label">AGENT CAPABILITIES</div>
+    <div class="nav-menu">
+      <div class="nav-item nav-static"><span class="nav-icon">⌁</span><span>数据分析</span></div>
+      <div class="nav-item nav-static"><span class="nav-icon">◇</span><span>混合检索</span></div>
+      <div class="nav-item nav-static"><span class="nav-icon">↗</span><span>行动建议</span></div>
+    </div>
+    <div class="nav-footer"><p><span class="status-dot"></span>知识库服务就绪</p><p>上传文件由 Docker 数据卷持久化</p></div>
+  </aside>
+
+  <main class="page">
+    <header class="topbar">
+      <div class="page-title"><h1>RAG 知识库管理</h1><p>上传、解析、结构化切割与向量化入库</p></div>
+      <div class="top-divider"></div>
+      <div class="top-context"><span>当前工作区</span><b>知识资产中心</b></div>
+      <div class="top-action"><input id="apiToken" class="token-input" type="password" placeholder="API Token（可选）"></div>
+    </header>
+
+    <section class="content">
+      <div class="eyebrow">RAG KNOWLEDGE PIPELINE</div>
+      <h1 class="page-heading">将企业资料转为可检索的知识资产</h1>
+      <p class="page-copy">文件上传后会经过安全校验、文本解析、按章节识别的父子切割与向量化入库。相同文件再次上传会精准覆盖该文件的旧向量，不会影响其他知识文档。</p>
+
+      <div class="grid two">
+        <section class="card card-pad">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start"><div><h2>上传知识文档</h2><p class="card-note" id="uploadPolicy">支持 MD、TXT、PDF、DOCX，单文件最大 20 MB。</p></div><span class="tag"><i></i>持久化存储</span></div>
+          <div class="upload-zone" id="dropZone">
+            <div class="upload-icon">↑</div>
+            <h3>拖放文件到这里，或选择本地文件</h3>
+            <p>建议上传制度、SOP、产品说明、业务规则等结构清晰的资料。</p>
+            <input id="fileInput" type="file" accept=".md,.txt,.pdf,.docx" hidden>
+            <button class="secondary-btn" id="chooseBtn" type="button">选择文件</button>
+            <div class="file-name" id="fileName">尚未选择文件</div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="primary-btn" id="uploadBtn" type="button" disabled>解析并入库</button></div>
+          <div class="alert" id="uploadMessage" role="status"></div>
+        </section>
+
+        <aside class="card card-pad">
+          <h2>本项目的切割策略</h2>
+          <p class="card-note">检索精度使用短子块，回答上下文回取对应父块，避免整篇文档塞入模型。</p>
+          <div class="pipeline">
+            <div class="pipeline-step"><span class="step-number">1</span><div><b>安全校验</b><p>白名单格式、文件名净化、非空校验和大小限制。</p></div></div>
+            <div class="pipeline-step"><span class="step-number">2</span><div><b>内容解析</b><p>DOCX 提取段落与表格；PDF、Markdown、TXT 分别解析为文本。</p></div></div>
+            <div class="pipeline-step"><span class="step-number">3</span><div><b>父子切割</b><p id="chunkingText">按章节识别父块，再切成检索子块。</p></div></div>
+            <div class="pipeline-step"><span class="step-number">4</span><div><b>向量化入库</b><p>子块写入 Chroma，父块独立保存；上传后检索缓存自动失效。</p></div></div>
+          </div>
+          <div class="knowledge-stats"><div class="stat"><b id="docTotal">–</b><span>当前知识文档</span></div><div class="stat"><b>20 MB</b><span>单文件限制</span></div></div>
+        </aside>
+      </div>
+
+      <section class="card card-pad" style="margin-top:18px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:14px"><div><h2>已入库文档</h2><p class="card-note">来源文件位于持久化上传目录；服务重建后仍保留。</p></div><button class="secondary-btn" id="refreshBtn" type="button">刷新清单</button></div>
+        <div class="table-wrap"><table><thead><tr><th>文档</th><th>类型</th><th>格式</th><th>大小</th><th>更新时间</th></tr></thead><tbody id="docTable"><tr><td class="empty" colspan="5">正在加载知识库清单…</td></tr></tbody></table></div>
+      </section>
+    </section>
+  </main>
+</div>
+
+<script>
+const TOKEN_KEY = 'biz_api_token';
+const tokenInput = document.getElementById('apiToken');
+tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+tokenInput.addEventListener('change', () => localStorage.setItem(TOKEN_KEY, tokenInput.value.trim()));
+const authHeaders = () => tokenInput.value.trim() ? { Authorization: 'Bearer ' + tokenInput.value.trim() } : {};
+const fileInput = document.getElementById('fileInput');
+const uploadBtn = document.getElementById('uploadBtn');
+const fileName = document.getElementById('fileName');
+const dropZone = document.getElementById('dropZone');
+let selectedFile = null;
+
+function escapeHtml(value) { return String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function formatBytes(value) { if (!value) return '0 B'; const u = ['B','KB','MB','GB']; const i = Math.min(Math.floor(Math.log(value) / Math.log(1024)), u.length - 1); return (value / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + u[i]; }
+function showMessage(type, message) { const el = document.getElementById('uploadMessage'); el.className = 'alert ' + type; el.textContent = message; }
+function selectFile(file) {
+  if (!file) return;
+  selectedFile = file;
+  fileName.textContent = file.name + ' · ' + formatBytes(file.size);
+  uploadBtn.disabled = false;
+  document.getElementById('uploadMessage').className = 'alert';
+}
+document.getElementById('chooseBtn').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => selectFile(fileInput.files[0]));
+['dragenter','dragover'].forEach(event => dropZone.addEventListener(event, e => { e.preventDefault(); dropZone.classList.add('dragover'); }));
+['dragleave','drop'].forEach(event => dropZone.addEventListener(event, e => { e.preventDefault(); dropZone.classList.remove('dragover'); }));
+dropZone.addEventListener('drop', event => selectFile(event.dataTransfer.files[0]));
+
+async function loadDocuments() {
+  const body = document.getElementById('docTable');
+  try {
+    const response = await fetch('/api/rag/documents', { headers: authHeaders() });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || '加载失败');
+    document.getElementById('docTotal').textContent = data.total_documents;
+    const policy = data.upload_policy || {};
+    document.getElementById('uploadPolicy').textContent = '支持 ' + (policy.allowed_extensions || []).map(x => x.toUpperCase()).join('、') + '，单文件最大 ' + formatBytes(policy.max_bytes || 0) + '。';
+    const c = data.chunking || {};
+    document.getElementById('chunkingText').textContent = '父块 ' + (c.parent_size || 1200) + ' 字 / 重叠 ' + (c.parent_overlap || 150) + '，子块 ' + (c.child_size || 350) + ' 字 / 重叠 ' + (c.child_overlap || 50) + '。';
+    const docs = data.documents || [];
+    body.innerHTML = docs.length ? docs.map(doc => '<tr><td class="doc-name">' + escapeHtml(doc.file) + '</td><td><span class="type-badge">' + escapeHtml(doc.doc_type) + '</span></td><td>' + escapeHtml(String(doc.extension || '').toUpperCase()) + '</td><td>' + formatBytes(doc.size_bytes) + '</td><td class="muted">' + escapeHtml((doc.updated_at || '').replace('T',' ')) + '</td></tr>').join('') : '<tr><td class="empty" colspan="5">暂无知识文档</td></tr>';
+  } catch (error) {
+    body.innerHTML = '<tr><td class="empty" colspan="5">加载失败：' + escapeHtml(error.message) + '</td></tr>';
+  }
+}
+
+uploadBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  const form = new FormData(); form.append('file', selectedFile);
+  uploadBtn.disabled = true; uploadBtn.textContent = '正在解析、切割并入库…';
+  showMessage('success', '文件已接收，正在解析、进行父子切割并生成向量；大文件可能需要一些时间。');
+  try {
+    const response = await fetch('/api/rag/upload', { method: 'POST', headers: authHeaders(), body: form });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || '入库失败');
+    showMessage('success', '已完成：' + data.file + ' 已解析并写入 ' + data.chunks + ' 个检索子块。重复上传同名文件会精准覆盖旧版本。');
+    selectedFile = null; fileInput.value = ''; fileName.textContent = '尚未选择文件';
+    await loadDocuments();
+  } catch (error) { showMessage('error', '上传失败：' + error.message); }
+  finally { uploadBtn.disabled = !selectedFile; uploadBtn.textContent = '解析并入库'; }
+});
+document.getElementById('refreshBtn').addEventListener('click', loadDocuments);
+loadDocuments();
+</script>
+</body>
+</html>

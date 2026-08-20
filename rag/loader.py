@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -240,6 +241,41 @@ def split_documents_hierarchical(
 def get_sample_docs() -> list[Path]:
     """rag/data/ 下的示例知识文档（md/txt/pdf/docx）。"""
     return sorted(p for p in DATA_DIR.glob("*.*") if p.is_file() and p.suffix.lower() in (".md", ".txt", ".pdf", ".docx"))
+
+
+def list_knowledge_documents() -> dict:
+    """返回知识库文件清单与当前切割策略，供管理页展示。
+
+    文件落在 ``rag/data``；Docker 环境中该目录由 ``rag_uploads`` 数据卷持久化，
+    因而容器重建不会丢失用户上传的知识文件。
+    """
+    documents = []
+    for path in get_sample_docs():
+        stat = path.stat()
+        documents.append({
+            "file": path.name,
+            "doc_type": _doc_type_for(path),
+            "extension": path.suffix.lower().lstrip("."),
+            "size_bytes": stat.st_size,
+            "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        })
+    documents.sort(key=lambda item: item["updated_at"], reverse=True)
+    return {
+        "documents": documents,
+        "total_documents": len(documents),
+        "chunking": {
+            "strategy": "parent_child",
+            "parent_size": PARENT_CHUNK_SIZE,
+            "parent_overlap": PARENT_CHUNK_OVERLAP,
+            "child_size": CHILD_CHUNK_SIZE,
+            "child_overlap": CHILD_CHUNK_OVERLAP,
+            "header_aware": True,
+        },
+        "upload_policy": {
+            "allowed_extensions": [ext.lstrip(".") for ext in ALLOWED_UPLOAD_EXTS],
+            "max_bytes": MAX_UPLOAD_BYTES,
+        },
+    }
 
 
 # ---------------- 上传入库（/api/rag/upload 专用） ----------------

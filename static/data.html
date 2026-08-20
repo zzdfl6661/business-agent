@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据采集 · 企业经营智能决策 Agent</title>
+  <link rel="stylesheet" href="/static/workspace.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="nav-rail" aria-label="主导航">
+    <div class="brand-lockup"><div class="brand-mark">✦</div><div><strong>Business Agent</strong><small>OPERATIONS COPILOT</small></div></div>
+    <div class="nav-label">WORKSPACE</div>
+    <nav class="nav-menu">
+      <a class="nav-item" href="/"><span class="nav-icon">✦</span><span>智能对话</span></a>
+      <a class="nav-item active" href="/data"><span class="nav-icon">◫</span><span>数据采集</span><span class="nav-pill">LIVE</span></a>
+      <a class="nav-item" href="/knowledge"><span class="nav-icon">◇</span><span>知识库管理</span></a>
+      <a class="nav-item" href="/sessions"><span class="nav-icon">◷</span><span>会话记忆</span></a>
+    </nav>
+    <div class="nav-label">AGENT CAPABILITIES</div>
+    <div class="nav-menu"><div class="nav-item nav-static"><span class="nav-icon">⌁</span><span>数据分析</span></div><div class="nav-item nav-static"><span class="nav-icon">◇</span><span>混合检索</span></div><div class="nav-item nav-static"><span class="nav-icon">↗</span><span>行动建议</span></div></div>
+    <div class="nav-footer"><p><span class="status-dot"></span>采集服务待命</p><p>同一时刻仅允许一个刷新任务</p></div>
+  </aside>
+
+  <main class="page">
+    <header class="topbar"><div class="page-title"><h1>数据采集工作台</h1><p>驱动美团后台数据刷新并让后续分析使用最新数据</p></div><div class="top-divider"></div><div class="top-context"><span>当前工作区</span><b>业务数据连接</b></div><div class="top-action"><input id="apiToken" class="token-input" type="password" placeholder="API Token（可选）"></div></header>
+    <section class="content">
+      <div class="eyebrow">DATA OPERATIONS</div>
+      <h1 class="page-heading">选择要同步的业务数据</h1>
+      <p class="page-copy">刷新成功后，数据工具缓存会立即失效，下一次经营提问将读取最新数据。采集任务会串行执行，避免多个浏览器自动化任务相互干扰。</p>
+      <div class="grid two">
+        <section class="card card-pad">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px"><div><h2>可执行采集任务</h2><p class="card-note">选择单项任务，或一键刷新全部可用数据集。</p></div><span class="tag"><i></i>运行态</span></div>
+          <div class="task-grid">
+            <button class="task-btn" data-dataset="campaign"><b>智选展位</b><span>推广计划、花费、点击与 ROI 数据</span></button>
+            <button class="task-btn" data-dataset="traffic"><b>客流分析</b><span>门店客流与渠道数据</span></button>
+            <button class="task-btn" data-dataset="transaction"><b>交易分析</b><span>订单、商品与交易明细</span></button>
+            <button class="task-btn" data-dataset="consult"><b>在线咨询</b><span>咨询与服务响应数据</span></button>
+            <button class="task-btn all" data-dataset="all"><b>全部刷新</b><span>依次执行全部数据集刷新</span></button>
+          </div>
+          <div class="alert" id="message" role="status"></div>
+        </section>
+        <aside class="card card-pad"><h2>运行说明</h2><div class="pipeline"><div class="pipeline-step"><span class="step-number">1</span><div><b>启动浏览器与登录态</b><p>自动检查 Edge 调试端口和已保存的登录状态。</p></div></div><div class="pipeline-step"><span class="step-number">2</span><div><b>下载并导入数据</b><p>按数据模块执行采集，成功后写入业务数据库。</p></div></div><div class="pipeline-step"><span class="step-number">3</span><div><b>失效数据缓存</b><p>经营 Agent 的下一次查询将使用刷新后的真实数据。</p></div></div></div></aside>
+      </div>
+      <section class="card card-pad" style="margin-top:18px"><div style="display:flex;justify-content:space-between;align-items:center"><div><h2>任务运行记录</h2><p class="card-note">仅展示当前页面发起任务的返回结果。</p></div><span class="tag" id="statusTag"><i></i>等待任务</span></div><pre class="result" id="result">选择一个数据集后，任务结果会显示在这里。</pre></section>
+    </section>
+  </main>
+</div>
+<script>
+const TOKEN_KEY = 'biz_api_token'; const tokenInput = document.getElementById('apiToken'); tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+tokenInput.addEventListener('change', () => localStorage.setItem(TOKEN_KEY, tokenInput.value.trim()));
+const authHeaders = (extra = {}) => Object.assign({}, extra, tokenInput.value.trim() ? { Authorization: 'Bearer ' + tokenInput.value.trim() } : {});
+const result = document.getElementById('result'); const message = document.getElementById('message'); const statusTag = document.getElementById('statusTag');
+function setMessage(type, text) { message.className = 'alert ' + type; message.textContent = text; }
+async function run(dataset) {
+  const buttons = [...document.querySelectorAll('[data-dataset]')]; buttons.forEach(b => b.disabled = true);
+  statusTag.innerHTML = '<i></i>任务运行中'; setMessage('success', '正在启动 ' + dataset + ' 采集任务，请勿重复点击。'); result.textContent = '请求已发送，等待服务端处理…';
+  try {
+    const response = await fetch('/api/workflow/refresh', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ datasets: dataset }) });
+    const data = await response.json(); result.textContent = JSON.stringify(data, null, 2);
+    if (!response.ok || !data.success) throw new Error(data.error || '任务执行失败');
+    setMessage('success', '刷新完成。后续经营分析会使用最新数据。'); statusTag.innerHTML = '<i></i>本次任务完成';
+  } catch (error) { setMessage('error', '任务失败：' + error.message); statusTag.textContent = '任务失败'; }
+  finally { buttons.forEach(b => b.disabled = false); }
+}
+document.querySelectorAll('[data-dataset]').forEach(button => button.addEventListener('click', () => run(button.dataset.dataset)));
+</script>
+</body>
+</html>

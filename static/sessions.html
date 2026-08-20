@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>会话记忆 · 企业经营智能决策 Agent</title>
+  <link rel="stylesheet" href="/static/workspace.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="nav-rail" aria-label="主导航">
+    <div class="brand-lockup"><div class="brand-mark">✦</div><div><strong>Business Agent</strong><small>OPERATIONS COPILOT</small></div></div>
+    <div class="nav-label">WORKSPACE</div>
+    <nav class="nav-menu">
+      <a class="nav-item" href="/"><span class="nav-icon">✦</span><span>智能对话</span></a>
+      <a class="nav-item" href="/data"><span class="nav-icon">◫</span><span>数据采集</span><span class="nav-pill">LIVE</span></a>
+      <a class="nav-item" href="/knowledge"><span class="nav-icon">◇</span><span>知识库管理</span></a>
+      <a class="nav-item active" href="/sessions"><span class="nav-icon">◷</span><span>会话记忆</span></a>
+    </nav>
+    <div class="nav-label">AGENT CAPABILITIES</div>
+    <div class="nav-menu"><div class="nav-item nav-static"><span class="nav-icon">⌁</span><span>数据分析</span></div><div class="nav-item nav-static"><span class="nav-icon">◇</span><span>混合检索</span></div><div class="nav-item nav-static"><span class="nav-icon">↗</span><span>行动建议</span></div></div>
+    <div class="nav-footer"><p><span class="status-dot"></span>会话存储就绪</p><p>最近 6 轮上下文用于连续追问</p></div>
+  </aside>
+  <main class="page">
+    <header class="topbar"><div class="page-title"><h1>会话记忆</h1><p>查看并继续已有的经营分析上下文</p></div><div class="top-divider"></div><div class="top-context"><span>当前工作区</span><b>对话资产</b></div><div class="top-action"><input id="apiToken" class="token-input" type="password" placeholder="API Token（可选）"><button class="secondary-btn" id="refreshBtn">刷新</button></div></header>
+    <section class="content">
+      <div class="eyebrow">CONVERSATION MEMORY</div>
+      <h1 class="page-heading">继续过去的分析，而不是从零开始</h1>
+      <p class="page-copy">选择一个会话后会跳转回智能对话页，并恢复该会话的历史消息；后续追问会沿用同一份上下文。</p>
+      <section class="card card-pad" style="margin-top:26px"><div style="display:flex;justify-content:space-between;align-items:center;gap:16px"><div><h2>历史会话</h2><p class="card-note" id="countText">正在读取会话列表…</p></div><a class="primary-btn" style="text-decoration:none" href="/">＋ 新对话</a></div><div class="session-list" id="sessionList"><div class="empty">正在加载…</div></div></section>
+    </section>
+  </main>
+</div>
+<script>
+const TOKEN_KEY = 'biz_api_token'; const tokenInput = document.getElementById('apiToken'); tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+tokenInput.addEventListener('change', () => localStorage.setItem(TOKEN_KEY, tokenInput.value.trim()));
+const authHeaders = () => tokenInput.value.trim() ? { Authorization: 'Bearer ' + tokenInput.value.trim() } : {};
+function escapeHtml(value) { return String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function openSession(id) { localStorage.setItem('biz_session_id', id); location.href = '/?session=' + encodeURIComponent(id); }
+async function loadSessions() {
+  const list = document.getElementById('sessionList');
+  try {
+    const response = await fetch('/api/sessions?limit=50', { headers: authHeaders() }); const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || '加载失败');
+    const sessions = data.sessions || []; document.getElementById('countText').textContent = '共 ' + sessions.length + ' 个可继续的会话。';
+    list.innerHTML = sessions.length ? sessions.map(s => '<article class="session-item"><div><h3>' + escapeHtml(s.last_question || '（尚未提问）') + '</h3><p>' + (s.message_count || 0) + ' 条消息 · 最近更新 ' + escapeHtml((s.updated_at || '').replace('T',' ')) + '</p></div><button class="secondary-btn" type="button" data-id="' + escapeHtml(s.session_id) + '">继续对话</button></article>').join('') : '<div class="empty">暂无历史会话，去智能对话页开始第一轮分析吧。</div>';
+    list.querySelectorAll('[data-id]').forEach(button => button.addEventListener('click', () => openSession(button.dataset.id)));
+  } catch (error) { list.innerHTML = '<div class="empty">加载失败：' + escapeHtml(error.message) + '</div>'; }
+}
+document.getElementById('refreshBtn').addEventListener('click', loadSessions); loadSessions();
+</script>
+</body>
+</html>

@@ -162,6 +162,8 @@
   .nav-item.active { color: #fff; background: linear-gradient(90deg, rgba(85,126,255,.34), rgba(85,126,255,.1)); box-shadow: inset 2px 0 #76a0ff; }
   .nav-icon { width: 20px; text-align: center; font-size: 15px; opacity: .95; }
   .nav-item .nav-pill { margin-left: auto; padding: 2px 6px; border-radius: 99px; color: #e7edff; background: rgba(130, 159, 255, .22); font-size: 10px; }
+  .nav-static { min-height: 34px; padding-block: 6px; color: #839ab9; cursor: default; }
+  .nav-static .nav-icon { font-size: 12px; }
   .nav-footer { margin-top: auto; z-index: 1; border: 1px solid rgba(173, 201, 239, .16); border-radius: 12px; padding: 12px; background: rgba(255,255,255,.04); }
   .nav-footer .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--mint); box-shadow: 0 0 0 3px rgba(47,196,155,.12); }
   .nav-footer p { font-size: 11px; color: #c5d4e8; line-height: 1.6; }
@@ -249,17 +251,17 @@
 
     <div class="nav-label">WORKSPACE</div>
     <nav class="nav-menu">
-      <a class="nav-item active" href="#chat"><span class="nav-icon">✦</span><span>智能对话</span></a>
-      <a class="nav-item" href="#dataOperations"><span class="nav-icon">◫</span><span>数据采集</span><span class="nav-pill">LIVE</span></a>
-      <a class="nav-item" href="#chat"><span class="nav-icon">◌</span><span>经营洞察</span></a>
-      <a class="nav-item" href="#historySessions"><span class="nav-icon">◷</span><span>会话记忆</span></a>
+      <a class="nav-item active" href="/"><span class="nav-icon">✦</span><span>智能对话</span></a>
+      <a class="nav-item" href="/data"><span class="nav-icon">◫</span><span>数据采集</span><span class="nav-pill">LIVE</span></a>
+      <a class="nav-item" href="/knowledge"><span class="nav-icon">◇</span><span>知识库管理</span></a>
+      <a class="nav-item" href="/sessions"><span class="nav-icon">◷</span><span>会话记忆</span></a>
     </nav>
 
     <div class="nav-label">AGENT CAPABILITIES</div>
     <nav class="nav-menu nav-menu-secondary">
-      <a class="nav-item" href="#chat"><span class="nav-icon">⌁</span><span>数据分析</span></a>
-      <a class="nav-item" href="#chat"><span class="nav-icon">◇</span><span>知识检索</span></a>
-      <a class="nav-item" href="#chat"><span class="nav-icon">↗</span><span>行动建议</span></a>
+      <div class="nav-item nav-static"><span class="nav-icon">⌁</span><span>数据分析</span></div>
+      <div class="nav-item nav-static"><span class="nav-icon">◇</span><span>混合检索</span></div>
+      <div class="nav-item nav-static"><span class="nav-icon">↗</span><span>行动建议</span></div>
     </nav>
 
     <div class="nav-footer">
@@ -646,6 +648,8 @@ function mergeStreamText(accumulated, chunk) {
 // 「新对话」= 换新 id；「历史列表」= 切回旧 id（后端恢复对应上下文）
 let currentSessionId = localStorage.getItem('biz_session_id')
   || ('s_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8));
+const requestedSessionId = new URLSearchParams(window.location.search).get('session');
+if (requestedSessionId) currentSessionId = requestedSessionId;
 localStorage.setItem('biz_session_id', currentSessionId);
 
 function newSessionId() {
@@ -763,7 +767,10 @@ async function renderSessionsFromCache() {
   // 打开会话后刷新列表高亮（避免重复请求：复用 loadSessions）
   loadSessions();
 }
-loadSessions();  // 页面初始化加载历史会话列表
+loadSessions().then(() => {
+  // 从独立“会话记忆”页跳回时，自动恢复指定会话。
+  if (requestedSessionId) openSession(requestedSessionId);
+});
 
 async function send() {
   const q = inputEl.value.trim();

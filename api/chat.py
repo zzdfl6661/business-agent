@@ -632,6 +632,12 @@ async def workflow_refresh(req: WorkflowRefreshRequest) -> dict:
     return result
 
 
+@router.get("/rag/documents")
+def rag_documents() -> dict:
+    """知识库管理页所需的文件清单、上传限制与父子切割配置。"""
+    return {"success": True, **loader.list_knowledge_documents()}
+
+
 @router.post("/rag/upload")
 async def rag_upload(file: UploadFile = File(...)) -> dict:
     """上传知识文档（md/txt/pdf/docx）→ 解析 → 切分 → 向量化入库。
@@ -641,7 +647,8 @@ async def rag_upload(file: UploadFile = File(...)) -> dict:
     """
     content = await file.read()
     try:
-        result = loader.upload_and_ingest(file.filename or "", content)
+        # 解析、向量化和 Chroma 写入均为阻塞型工作，放入线程池避免阻塞其他 SSE 对话。
+        result = await run_in_threadpool(loader.upload_and_ingest, file.filename or "", content)
     except Exception as exc:  # noqa: BLE001
         logger.error("知识文档入库失败：%s", exc)
         return {"success": False, "file": file.filename or "", "error": str(exc)}

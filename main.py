@@ -73,6 +73,24 @@ def index() -> FileResponse:
     return FileResponse(BASE_DIR / "static" / "index.html")
 
 
+@app.get("/data", include_in_schema=False)
+def data_workspace() -> FileResponse:
+    """数据采集工作台。"""
+    return FileResponse(BASE_DIR / "static" / "data.html")
+
+
+@app.get("/knowledge", include_in_schema=False)
+def knowledge_workspace() -> FileResponse:
+    """RAG 知识库管理与上传页。"""
+    return FileResponse(BASE_DIR / "static" / "knowledge.html")
+
+
+@app.get("/sessions", include_in_schema=False)
+def sessions_workspace() -> FileResponse:
+    """独立历史会话页。"""
+    return FileResponse(BASE_DIR / "static" / "sessions.html")
+
+
 @app.get("/health")
 def health() -> dict:
     return {
