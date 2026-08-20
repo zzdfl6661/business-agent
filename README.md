@@ -15,6 +15,23 @@
 
 ---
 
+## 运行预览
+
+首页是经营决策工作台，左侧导航对应独立页面：智能对话、数据采集、知识库管理和会话记忆。`AGENT CAPABILITIES` 下的能力入口也会跳转到对应的可用页面，而不是静态占位文字。
+
+![Business Agent 经营决策工作台](docs/assets/demo-dashboard.png)
+
+Docker 启动后可直接访问：
+
+```text
+http://localhost/             # 智能对话
+http://localhost/data         # 数据采集工作台
+http://localhost/knowledge    # RAG 知识库上传、切割与入库
+http://localhost/sessions     # 历史会话与上下文恢复
+```
+
+---
+
 ## 一、核心特性
 
 | 特性 | 说明 |
@@ -78,7 +95,9 @@ curl http://127.0.0.1:8000/health
 
 ### 3.1 前端页面
 
-浏览器打开 `http://127.0.0.1:8000/`，内置 8 个示例问题（📊 经营分析 4 个 + 📖 内部制度 4 个），支持 SSE 流式输出（kb 逐 token / data 结构化五段卡片）、KPI 指标卡、LLM 通道下拉切换、会话删除与导出、右上角 API Token 输入。
+浏览器打开 `http://localhost/`，内置 8 个示例问题（📊 经营分析 4 个 + 📖 内部制度 4 个），支持 SSE 流式输出（kb 逐 token / data 结构化五段卡片）、KPI 指标卡、LLM 通道下拉切换、会话删除与导出、右上角 API Token 输入。开发环境直接运行 Uvicorn 时也可访问 `http://127.0.0.1:8000/`。
+
+知识库管理页支持拖放或选择 Markdown / TXT / PDF / DOCX 文件。上传后按项目既定父子策略完成解析和入库：章节感知父块（1200 字，重叠 150）→ 检索子块（350 字，重叠 50）→ Embedding → Chroma 持久化；页面会显示实际入库 chunk 数和当前文档清单。
 
 ### 3.2 API
 
@@ -130,6 +149,7 @@ curl http://127.0.0.1:8000/api/sessions \
 | `POST /api/chat/stream` | SSE 流式对话（节点进度 + kb 真流式 token + done 含 report_sections/pending_plans/request_id） |
 | `GET /api/sessions` / `POST /api/sessions/{id}` / `DELETE /api/sessions/{id}` | 会话列表 / 指定会话 / 删除会话 |
 | `GET /api/sessions/{id}/messages` | 单会话历史消息 |
+| `GET /api/rag/documents` | 知识库文件清单、上传规则与切割策略 |
 | `POST /api/rag/upload` | 知识库文件上传入库（basename 白名单 + 20MB + 按文件名幂等） |
 | `POST /api/workflow/refresh` | 数据采集（智选展位/客流/交易/咨询；成功后数据缓存失效） |
 | `POST /api/execute/confirm` | **确认并执行自动化计划**（唯一能真正执行预算修改的入口，需 plan_id） |
