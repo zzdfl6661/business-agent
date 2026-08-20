@@ -139,13 +139,145 @@
   .plan-result.ok { color: #00b578; }
   .plan-result.err { color: #e5484d; }
 </style>
+<style>
+  /* ============ 经营驾驶舱视觉层：不改接口，仅重构工作台体验 ============ */
+  :root {
+    --ink: #10213b; --muted: #71819a; --line: #e7edf5; --canvas: #f4f7fb;
+    --surface: #ffffff; --navy: #0b1f3a; --navy-2: #102b51; --brand: #3b6df6;
+    --mint: #2fc49b; --violet: #8057ea; --shadow: 0 18px 45px rgba(28, 54, 96, .09);
+  }
+  * { scrollbar-width: thin; scrollbar-color: #ccd6e5 transparent; }
+  body { background: var(--canvas); color: var(--ink); min-width: 1024px; }
+  .shell { display: flex; flex: 1; min-height: 0; }
+  .nav-rail { width: 224px; flex: 0 0 224px; color: #dbe7fb; background: radial-gradient(circle at 22% 4%, #1b477c 0, var(--navy) 38%, #08192f 100%); padding: 20px 14px; display: flex; flex-direction: column; position: relative; overflow: hidden; }
+  .nav-rail::after { content: ''; position: absolute; width: 220px; height: 220px; border-radius: 50%; background: rgba(86, 132, 255, .13); left: -110px; bottom: -96px; filter: blur(4px); }
+  .brand-lockup { display: flex; gap: 10px; align-items: center; padding: 8px 10px 28px; position: relative; z-index: 1; }
+  .brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 12px; background: linear-gradient(135deg, #5a87ff, #8a6cff); box-shadow: 0 8px 22px rgba(80, 117, 255, .32); font-size: 18px; }
+  .brand-lockup strong { display: block; color: #fff; font-size: 14px; letter-spacing: .1px; }
+  .brand-lockup small { display: block; margin-top: 2px; color: #9fb5d4; font-size: 10px; letter-spacing: 1.1px; text-transform: uppercase; }
+  .nav-label { padding: 0 10px; margin: 9px 0 8px; color: #7691b5; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }
+  .nav-menu { display: grid; gap: 4px; position: relative; z-index: 1; }
+  .nav-item { display: flex; align-items: center; gap: 11px; padding: 10px; border-radius: 10px; color: #b8c9e1; text-decoration: none; font-size: 13px; transition: .2s ease; }
+  .nav-item:hover { color: #fff; background: rgba(255,255,255,.07); }
+  .nav-item.active { color: #fff; background: linear-gradient(90deg, rgba(85,126,255,.34), rgba(85,126,255,.1)); box-shadow: inset 2px 0 #76a0ff; }
+  .nav-icon { width: 20px; text-align: center; font-size: 15px; opacity: .95; }
+  .nav-item .nav-pill { margin-left: auto; padding: 2px 6px; border-radius: 99px; color: #e7edff; background: rgba(130, 159, 255, .22); font-size: 10px; }
+  .nav-footer { margin-top: auto; z-index: 1; border: 1px solid rgba(173, 201, 239, .16); border-radius: 12px; padding: 12px; background: rgba(255,255,255,.04); }
+  .nav-footer .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--mint); box-shadow: 0 0 0 3px rgba(47,196,155,.12); }
+  .nav-footer p { font-size: 11px; color: #c5d4e8; line-height: 1.6; }
+  .nav-footer p + p { color: #7794b7; margin-top: 2px; }
+
+  .app { background: var(--canvas); min-width: 0; }
+  .main { background: radial-gradient(circle at 55% -20%, #fff 0, #f5f8fc 45%, #f2f6fb 100%); }
+  .topbar { min-height: 76px; padding: 13px 26px; display: flex; align-items: center; gap: 16px; background: rgba(255,255,255,.82); border-bottom: 1px solid var(--line); backdrop-filter: blur(14px); }
+  .page-title { min-width: 250px; }
+  .page-title h1 { font-size: 16px; font-weight: 760; letter-spacing: -.2px; color: var(--ink); }
+  .page-title p { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .top-divider { height: 26px; width: 1px; background: var(--line); }
+  .top-context { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+  .top-context b { color: var(--ink); font-weight: 650; }
+  .live-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid #d8eee8; color: #168865; background: #f1fbf7; border-radius: 8px; font-size: 11px; white-space: nowrap; }
+  .live-badge i { display: block; width: 6px; height: 6px; border-radius: 50%; background: var(--mint); }
+  .topbar .token-input { margin-left: 0; width: 145px; border-color: var(--line); background: #fbfcff; border-radius: 8px; padding: 7px 10px; }
+  .topbar .llm-select { border-color: var(--line); background: #fbfcff; border-radius: 8px; padding: 7px 9px; }
+  .auth-hint { margin-left: auto; }
+
+  .wf-bar { padding: 12px 26px; gap: 7px; background: rgba(255,255,255,.72); border-bottom: 1px solid var(--line); }
+  .wf-label { color: #506581; font-size: 12px; }
+  .wf-btn { border-color: #dfe7f2; background: #fff; color: #49627f; border-radius: 7px; padding: 6px 11px; font-size: 12px; }
+  .wf-btn:hover { border-color: #aebfff; color: #315bd2; background: #f5f8ff; }
+  .wf-btn.primary { background: var(--brand); border-color: var(--brand); box-shadow: 0 5px 12px rgba(59,109,246,.18); }
+  .wf-status { margin-left: 5px; font-size: 11px; }
+
+  .conversation-header { max-width: 960px; margin: 22px auto 0; padding: 0 25px; display: flex; justify-content: space-between; align-items: center; }
+  .conversation-kicker { color: var(--brand); font-weight: 700; letter-spacing: .9px; font-size: 10px; }
+  .conversation-header h2 { font-size: 18px; letter-spacing: -.35px; margin-top: 4px; }
+  .conversation-header p { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .shortcut-hint { font-size: 11px; color: var(--muted); background: rgba(255,255,255,.76); border: 1px solid var(--line); padding: 7px 9px; border-radius: 8px; }
+  #chat { padding: 18px 0 28px; }
+  .wrap { max-width: 960px; padding: 0 25px; }
+  .hero-card { max-width: none !important; border: 1px solid #dfe7f4 !important; border-radius: 16px !important; background: linear-gradient(135deg, #fff 0%, #f7faff 100%) !important; box-shadow: var(--shadow); padding: 20px !important; }
+  .hero-eyebrow { color: var(--brand); font-size: 11px; font-weight: 750; letter-spacing: .8px; }
+  .hero-title { font-size: 20px; line-height: 1.4; font-weight: 760; color: var(--ink); margin: 6px 0; letter-spacing: -.4px; }
+  .hero-copy { color: #60728c; font-size: 13px; }
+  .msg { margin-bottom: 22px; }
+  .msg .avatar { width: 36px; height: 36px; box-shadow: 0 6px 15px rgba(29, 58, 103, .14); }
+  .msg.bot .avatar { background: linear-gradient(135deg, #2fc49b, #22a6cc); }
+  .msg.user .avatar { background: linear-gradient(135deg, #527df8, #7659d9); }
+  .bubble { max-width: 82%; padding: 13px 16px; line-height: 1.7; font-size: 13.5px; }
+  .msg.user .bubble { background: linear-gradient(135deg, #386cf3, #536cf1); box-shadow: 0 9px 19px rgba(65,104,240,.16); }
+  .msg.bot .bubble { border-color: #e4eaf3; box-shadow: 0 8px 22px rgba(29, 57, 98, .05); border-radius: 4px 14px 14px 14px; }
+  .suggest { margin-top: 15px; gap: 7px; }
+  .suggest-group { width: 100%; display: flex; align-items: center; gap: 7px; margin-top: 4px; }
+  .suggest-tag { padding: 0; color: #71819a; font-size: 11px; }
+  .suggest button { border-color: #dbe4f1; background: #fff; color: #315ccf; border-radius: 8px; padding: 7px 10px; font-size: 11.5px; transition: .18s; }
+  .suggest button:hover { transform: translateY(-1px); box-shadow: 0 5px 12px rgba(40,74,144,.10); }
+  .kpi { border-color: #e4eaf3; background: linear-gradient(145deg, #fff, #f9fbff); border-radius: 11px; }
+  .md-sec { border-color: #e3eaf3; border-radius: 11px; box-shadow: 0 6px 18px rgba(27,56,95,.045); }
+  .meta { color: #7e8da3; font-size: 11px; }
+
+  footer { padding: 15px 26px 20px; background: rgba(250,252,255,.92); border-top: 1px solid var(--line); }
+  .input-row { max-width: 960px; background: #fff; border: 1px solid #d9e3f0; border-radius: 14px; padding: 5px; box-shadow: 0 9px 26px rgba(34,65,108,.08); }
+  #input { border: 0; padding: 10px 12px; min-height: 48px; color: var(--ink); }
+  #input:focus { border: 0; box-shadow: none; }
+  #send { border-radius: 10px; min-width: 82px; background: linear-gradient(135deg, #3e70f8, #5d65ed); box-shadow: 0 6px 15px rgba(59,109,246,.22); }
+
+  .sidebar { width: 288px; background: rgba(255,255,255,.88); border-left: 1px solid var(--line); }
+  .sidebar-head { padding: 18px 16px 13px; border-bottom: 1px solid var(--line); }
+  .sidebar-head h2 { color: var(--ink); font-size: 14px; }
+  .sidebar-sub { margin-top: 4px; font-size: 11px; color: var(--muted); }
+  .new-chat-btn { border-radius: 8px; background: var(--brand); padding: 7px 10px; box-shadow: 0 5px 12px rgba(59,109,246,.16); }
+  .session-list { padding: 10px; }
+  .session-item { border: 1px solid transparent; border-radius: 10px; margin-bottom: 6px; padding: 11px; }
+  .session-item:hover { background: #f7f9fd; }
+  .session-item.active { border-color: #bfceff; background: #f0f4ff; box-shadow: inset 3px 0 var(--brand); }
+  .session-item .s-title { color: #33445e; font-size: 12.5px; }
+  .session-item .s-meta { color: #8a9ab0; }
+  .session-empty { color: #8a9ab0; }
+
+  @media (max-width: 1180px) { .nav-rail { width: 72px; flex-basis: 72px; padding: 20px 10px; } .brand-lockup { padding: 7px 8px 28px; } .brand-lockup strong, .brand-lockup small, .nav-label, .nav-item span:not(.nav-icon), .nav-pill, .nav-footer { display: none; } .nav-item { justify-content: center; padding: 11px; } .top-context { display: none; } }
+  @media (max-width: 900px) { body { min-width: 0; } .nav-rail { display: none; } .sidebar { display: none; } .page-title { min-width: 0; } .topbar { padding: 12px 16px; } .live-badge { display: none; } .topbar .token-input { display: none; } .wf-bar { padding: 10px 16px; } .conversation-header, .wrap { padding-left: 16px; padding-right: 16px; } footer { padding: 12px 16px; } .bubble { max-width: 90%; } }
+</style>
 </head>
 <body>
+<div class="shell">
+  <aside class="nav-rail" aria-label="主导航">
+    <div class="brand-lockup">
+      <div class="brand-mark">✦</div>
+      <div><strong>Business Agent</strong><small>OPERATIONS COPILOT</small></div>
+    </div>
+
+    <div class="nav-label">WORKSPACE</div>
+    <nav class="nav-menu">
+      <a class="nav-item active" href="#chat"><span class="nav-icon">✦</span><span>智能对话</span></a>
+      <a class="nav-item" href="#dataOperations"><span class="nav-icon">◫</span><span>数据采集</span><span class="nav-pill">LIVE</span></a>
+      <a class="nav-item" href="#chat"><span class="nav-icon">◌</span><span>经营洞察</span></a>
+      <a class="nav-item" href="#historySessions"><span class="nav-icon">◷</span><span>会话记忆</span></a>
+    </nav>
+
+    <div class="nav-label">AGENT CAPABILITIES</div>
+    <nav class="nav-menu nav-menu-secondary">
+      <a class="nav-item" href="#chat"><span class="nav-icon">⌁</span><span>数据分析</span></a>
+      <a class="nav-item" href="#chat"><span class="nav-icon">◇</span><span>知识检索</span></a>
+      <a class="nav-item" href="#chat"><span class="nav-icon">↗</span><span>行动建议</span></a>
+    </nav>
+
+    <div class="nav-footer">
+      <p><span class="status-dot"></span>工作台已就绪</p>
+      <p>数据分析 · 知识问答 · 执行确认</p>
+    </div>
+  </aside>
+
 <div class="app">
   <div class="main">
-<header>
-  <h1>🏪 企业经营智能决策 Agent</h1>
-  <span class="badge">数据分析 · 知识问答 · 智能诊断 · 自动执行</span>
+<header class="topbar">
+  <div class="page-title">
+    <h1>企业经营智能决策 Agent</h1>
+    <p>为门店运营提供可追溯的 AI 决策支持</p>
+  </div>
+  <div class="top-divider"></div>
+  <div class="top-context"><span>当前工作区</span><b>经营分析工作台</b></div>
+  <span class="live-badge"><i></i>Agent workflow ready</span>
   <span id="authHint" class="auth-hint" style="display:none"></span>
   <select id="llmProvider" class="llm-select" title="LLM 通道（运行时切换，无需重启）">
     <option value="">加载中…</option>
@@ -153,7 +285,7 @@
   <input id="apiToken" class="token-input" type="password" placeholder="API Token（可选）" title="后端配置了 BIZ_API_TOKEN 时需填写，否则接口返回 401">
 </header>
 
-<div class="wf-bar">
+<div class="wf-bar" id="dataOperations">
   <span class="wf-label">📦 数据采集</span>
   <button class="wf-btn" onclick="runWorkflow('campaign')">智选展位</button>
   <button class="wf-btn" onclick="runWorkflow('traffic')">客流分析</button>
@@ -163,19 +295,32 @@
   <span id="wfStatus" class="wf-status"></span>
 </div>
 
+<div class="conversation-header">
+  <div>
+    <div class="conversation-kicker">AI DECISION COPILOT</div>
+    <h2>从问题到可信的经营结论</h2>
+    <p>数据问题优先查询业务库；制度问题引用内部知识资产。</p>
+  </div>
+  <div class="shortcut-hint">Enter 发送 · Shift + Enter 换行</div>
+</div>
+
 <div id="chat">
   <div class="wrap">
     <div class="msg bot" id="welcomeMsg">
       <div class="avatar">🤖</div>
       <div>
-        <div class="bubble">
-          你好，我是门店经营分析助手 👋 经营数据分析和门店内部制度问题都可以问我：
-          <div class="suggest">
+        <div class="bubble hero-card">
+          <div class="hero-eyebrow">WELCOME TO OPERATIONS COPILOT</div>
+          <div class="hero-title">今天，想先看哪一项经营表现？</div>
+          <div class="hero-copy">提问后我会判断数据来源、执行分析，并给出可复核的结论与建议。</div>
+          <div class="suggest suggest-group">
             <span class="suggest-tag">📊 经营分析</span>
             <button onclick="ask('分析最近7天1号门店营业额下降原因并给出优化建议')">1号店营业额下降分析</button>
             <button onclick="ask('分析最近7天智选展位推广的花费与ROI情况，找出低效推广，并给出预算优化建议')">推广ROI分析</button>
-            <button onclick="ask('各门店综合表现排名怎么样')">门店综合排名</button>
+            <button onclick="ask('最近7天门店销量最多的是哪一家')">门店销量排名</button>
             <button onclick="ask('最近7天团建套餐品类表现如何，为什么下滑')">团建套餐分析</button>
+          </div>
+          <div class="suggest suggest-group">
             <span class="suggest-tag">📖 内部制度</span>
             <button onclick="ask('我是新员工，每天上班时间是多少，忘记打卡怎么办')">上班时间与忘打卡</button>
             <button onclick="ask('门店晋升需要什么条件，怎么报名')">晋升条件与报名</button>
@@ -196,15 +341,16 @@
 </footer>
   </div>
 
-  <aside class="sidebar">
+  <aside class="sidebar" id="historySessions">
     <div class="sidebar-head">
-      <h2>💬 历史对话</h2>
+      <div><h2>最近会话</h2><p class="sidebar-sub">保留上下文，随时继续分析</p></div>
       <button class="new-chat-btn" onclick="newConversation()">＋ 新对话</button>
     </div>
     <div class="session-list" id="sessionList">
       <div class="session-empty">暂无历史对话</div>
     </div>
   </aside>
+</div>
 </div>
 
 <script>
@@ -510,9 +656,10 @@ function newSessionId() {
 function clearChat() {
   // 清空聊天区，恢复欢迎语
   const wrap = chatEl.querySelector('.wrap');
-  wrap.innerHTML = '';
   const welcome = document.getElementById('welcomeMsg');
-  if (welcome) wrap.appendChild(welcome.cloneNode(true));
+  const freshWelcome = welcome ? welcome.cloneNode(true) : null;
+  wrap.innerHTML = '';
+  if (freshWelcome) wrap.appendChild(freshWelcome);
 }
 
 async function newConversation() {
