@@ -28,7 +28,7 @@ KNOWLEDGE_KEYS = [
 # 未命中则默认走 RAG 知识问答（制度/手册/话术/流程等非数据类提问）
 DATA_KEYS = [
     # 核心经营指标
-    "营业额", "gmv", "销售额", "营收", "收入", "订单", "单量", "客单价", "单数",
+    "营业额", "gmv", "销售额", "销售量", "销量", "营收", "收入", "订单", "单量", "客单价", "单数",
     "环比", "同比", "增长", "下降", "上升", "下滑", "趋势", "涨了", "跌了",
     # 推广投放
     "推广", "广告", "投放", "roi", "转化", "点击", "花费", "消耗", "预算",
@@ -46,8 +46,12 @@ DATA_KEYS = [
 # 门店排名/市场对比类问题关键词（决定报告输入是市场数据而非单店 sales）
 MARKET_KEYS = [
     "排名", "排行", "综合", "哪家店", "门店对比", "客流", "交易", "咨询",
-    "表现", "门店排行", "top",
+    "表现", "门店排行", "top", "哪一家", "哪个门店", "最多", "最少", "最高", "最低",
 ]
+
+SALES_RANKING_METRICS = ("销量", "销售量", "订单", "单量", "营业额", "销售额", "gmv", "营收")
+RANKING_CUES = ("排名", "排行", "哪家", "哪一家", "哪个门店", "最多", "最少", "最高", "最低", "top")
+DATA_ADVICE_KEYS = ("原因", "为什么", "建议", "策略", "优化", "提升", "诊断", "怎么办", "如何")
 
 
 def resolve_intent(question: str) -> str:
@@ -72,3 +76,17 @@ def is_market_question(question: str) -> bool:
     """是否门店排名/市场对比类问题（决定报告取市场数据维度）。"""
     q = (question or "").lower()
     return any(k in q for k in MARKET_KEYS)
+
+
+def is_sales_ranking_question(question: str) -> bool:
+    """是否需要按门店查询销售/销量排名（而非综合经营排名）。"""
+    q = (question or "").lower()
+    return any(k in q for k in SALES_RANKING_METRICS) and any(k in q for k in RANKING_CUES)
+
+
+def should_retrieve_operation_knowledge(question: str, intent_type: str) -> bool:
+    """知识库只服务制度问答或数据诊断建议，纯数据事实查询不检索。"""
+    if intent_type == "kb":
+        return True
+    q = (question or "").lower()
+    return any(k in q for k in DATA_ADVICE_KEYS)

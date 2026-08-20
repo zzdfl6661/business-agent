@@ -21,13 +21,19 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from agent.routing import is_data_question, is_market_question, resolve_intent
+from agent.routing import (
+    is_data_question,
+    is_market_question,
+    is_sales_ranking_question,
+    resolve_intent,
+    should_retrieve_operation_knowledge,
+)
 from config.llm_factory import create_llm
 from config.settings import settings
 from tools import ALL_TOOLS
 from tools.analysis_tool import analysis_business_data
 from tools.browser_tool import update_campaign_budget
-from tools.database_tool import get_campaign_data, get_sales_data
+from tools.database_tool import get_campaign_data, get_sales_data, get_store_sales_ranking
 from tools.market_data_tool import get_consult_data, get_store_ranking, get_traffic_data, get_transaction_data
 from tools.rag_tool import search_operation_knowledge
 
@@ -39,7 +45,11 @@ DATA_REPORT_MAX_TOKENS = 1200
 RAG_REWRITE_TRIGGER_SCORE = 0.70
 
 # 工具名 → query_result 键（结构化存放供分析节点确定性读取）
-_QUERY_KEYS = {"get_sales_data": "sales", "get_campaign_data": "campaign"}
+_QUERY_KEYS = {
+    "get_sales_data": "sales",
+    "get_store_sales_ranking": "sales_ranking",
+    "get_campaign_data": "campaign",
+}
 
 KNOWLEDGE_REPORT_PROMPT = """你是连锁门店的内部知识助手，服务对象是门店员工（新员工、店员、店长等）。请用**口语化、自然、清晰**的方式回答制度/流程/话术类问题，让提问者一眼就能看懂、直接用。
 
@@ -55,6 +65,7 @@ INTENT_SYSTEM_PROMPT = """你是连锁门店经营分析助手。根据用户问
 
 可用工具：
 - get_sales_data：查询门店销售数据（营业额/订单数/客单价/环比）
+- get_store_sales_ranking：查询跨门店销量/订单量/营业额排名
 - get_campaign_data：查询推广数据（消耗/点击/转化/ROI）
 - get_traffic_data：查询客流数据（曝光/访问/意向转化，门店维度，可排名）
 - get_transaction_data：查询交易数据（下单/核销/退款金额，门店维度，可排名）
@@ -165,7 +176,10 @@ def _build_data_tool_plan(question: str, store_id: int | None) -> list[dict] | N
     campaign_words = ("推广", "广告", "投放", "roi", "点击", "花费", "消耗", "转化")
     sales_words = ("营业额", "gmv", "销售额", "营收", "收入", "订单", "单量", "客单价", "环比", "同比", "增长", "下降", "趋势", "金额")
     plan: list[dict] = []
-    if market:
+    if is_sales_ranking_question(q):
+        metric = "sales_volume" if any(k in q for k in ("销量", "销售量")) else "gmv"
+        plan = [{"name": "get_store_sales_ranking", "args": {"days": days, "metric": metric, "top_n": 10}}]
+    elif market:
         plan = [
             {"name": "get_store_ranking", "args": {"top_n": 10}},
             {"name": "get_traffic_data", "args": {"rank": True}},
@@ -285,9 +299,19 @@ def analysis_node(state: dict) -> dict:
         {"sales_data": sales, "campaign_data": campaign}
     )
 
-    # 市场数据兜底：排名/客流/交易/咨询类问题，LLM 未调用新工具时确定性补查
+    # 市场数据兜底：销售排名与客流/交易/咨询类问题，LLM 未调用时确定性补查
     question = state.get("user_question", "")
-    if is_market_question(question):
+    if is_sales_ranking_question(question):
+        if "sales_ranking" not in query_result:
+            try:
+                query_result["sales_ranking"] = get_store_sales_ranking.invoke({
+                    "days": _extract_query_days(question),
+                    "metric": "sales_volume" if any(k in question.lower() for k in ("销量", "销售量")) else "gmv",
+                    "top_n": 10,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("兜底查询门店销售排名失败：%s", exc)
+    elif is_market_question(question):
         for tool, key in (
             (get_store_ranking, "get_store_ranking"),
             (get_traffic_data, "get_traffic_data"),
@@ -424,8 +448,11 @@ def rag_node(state: dict) -> dict:
             docs = _dedup_docs(list(raw_docs) + pooled, 6)
             logger.info("kb 低置信检索：原问题 + 改写%s + HyDE%s → %s 条去重",
                         len(rewritten), "✓" if hyde else "✗", len(docs))
-    else:
+    elif should_retrieve_operation_knowledge(question, state.get("intent_type", "data")):
         docs = search_operation_knowledge.invoke({"query": question, "top_k": 5})
+    else:
+        docs = []
+        logger.info("纯数据事实查询：跳过内部知识库检索：%s", question[:60])
 
     # 经验层：问题 + 分析结论（召回相关历史诊断报告）
     # 仅经营分析链路（intent=data）需要；知识问答（kb）不查经验层——
@@ -563,9 +590,24 @@ def _refresh_prefix(state: dict, report: str) -> str:
     return report
 
 
+def _merge_stream_text(accumulated: str, content: str) -> str:
+    """合并标准增量与少数兼容端点返回的累计流式文本。"""
+    if not content:
+        return accumulated
+    if not accumulated:
+        return content
+    # OpenAI 标准 SSE 返回增量；部分兼容端点会重复发送“从开头到当前”的累计文本。
+    # 若仍直接 append，会把整段答案重复渲染。
+    if content == accumulated or accumulated.endswith(content):
+        return accumulated
+    if content.startswith(accumulated):
+        return content
+    return accumulated + content
+
+
 def _stream_report(llm, messages: list, max_tokens: int) -> str:
     """流式 markdown 报告生成（kb 链路 + data 结构化失败回退），含空输出重试兜底。"""
-    parts: list[str] = []
+    report = ""
     try:
         for chunk in llm.stream(messages, max_tokens=max_tokens):
             content = chunk.content
@@ -575,13 +617,13 @@ def _stream_report(llm, messages: list, max_tokens: int) -> str:
                     if isinstance(b, dict) and b.get("type") == "text"
                 )
             if content:
-                parts.append(content)
+                report = _merge_stream_text(report, str(content))
     except Exception as exc:  # noqa: BLE001
         logger.warning("report 流式调用异常，回退非流式：%s", exc)
         response = llm.invoke(messages, max_tokens=max_tokens)
-        parts = [response.content if isinstance(response.content, str) else str(response.content)]
+        report = response.content if isinstance(response.content, str) else str(response.content)
 
-    report = "".join(parts).strip()
+    report = report.strip()
     if not report:
         logger.warning("report 首轮输出为空（推理链占满 max_tokens），重试一次")
         response = llm.invoke(messages)
@@ -735,6 +777,16 @@ def _build_report_input(state: dict) -> str:
                 }
                 for d in (state.get("retrieval_docs") or [])[:5]
             ],
+        }, ensure_ascii=False, default=str)
+
+    if is_sales_ranking_question(question):
+        # 销量/销售额排名是纯事实查询：只给对应 MySQL 排名结果，避免混入综合排名或知识条款。
+        return json.dumps({
+            "user_question": question,
+            "query_result": {"sales_ranking": query_result.get("sales_ranking", {})},
+            "analysis_result": {},
+            "retrieval_docs": [],
+            "pending_plans": _pending_plans_summary(state),
         }, ensure_ascii=False, default=str)
 
     if is_market_question_flag:

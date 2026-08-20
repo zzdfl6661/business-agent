@@ -488,6 +488,14 @@ function appendMsg(role, html, meta) {
 
 function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+// 兼容少数 OpenAI-compatible 服务返回“累计内容块”而不是标准增量块，避免前端过程文本重复。
+function mergeStreamText(accumulated, chunk) {
+  if (!chunk || !accumulated) return accumulated || chunk || '';
+  if (chunk === accumulated || accumulated.endsWith(chunk)) return accumulated;
+  if (chunk.startsWith(accumulated)) return chunk;
+  return accumulated + chunk;
+}
+
 // 会话持久化：currentSessionId 存 localStorage，刷新/重启不丢上下文（后端按 session 记忆）
 // 「新对话」= 换新 id；「历史列表」= 切回旧 id（后端恢复对应上下文）
 let currentSessionId = localStorage.getItem('biz_session_id')
@@ -659,7 +667,7 @@ async function send() {
           progEl.textContent = data;
         } else if (event === 'token') {
           if (repEl.style.display === 'none') { repEl.style.display = ''; progEl.style.display = 'none'; }
-          reportText += data;
+          reportText = mergeStreamText(reportText, data);
           repEl.textContent = reportText;   // 打字机纯文本
           chatEl.scrollTop = chatEl.scrollHeight;
         } else if (event === 'error') {

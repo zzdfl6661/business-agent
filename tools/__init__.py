@@ -15,6 +15,7 @@ from tools import database_tool, analysis_tool, rag_tool, browser_tool, market_d
 # （/api/workflow/refresh），避免对话触发的高成本与不可控性
 ALL_TOOLS: list = [
     database_tool.get_sales_data,
+    database_tool.get_store_sales_ranking,
     database_tool.get_campaign_data,
     market_data_tool.get_traffic_data,
     market_data_tool.get_transaction_data,

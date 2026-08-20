@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from langchain_core.tools import tool
 from sqlalchemy import func, select
 
-from database.models import Campaign, Order, Product, PromotionReport
+from database.models import Campaign, Order, Product, PromotionReport, Store
 from database.mysql import get_session_factory
 from tools.data_cache import get as cache_get
 from tools.data_cache import set as cache_set
@@ -207,6 +207,78 @@ def get_sales_data(
         "error": None,
     }
     cache_set("get_sales_data", params, result)  # #7 TTL 缓存（refresh 后失效）
+    return result
+
+
+@tool
+def get_store_sales_ranking(
+    days: int = 7,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    metric: str = "sales_volume",
+    top_n: int = 10,
+) -> dict:
+    """查询门店销售排名（真实 MySQL 订单数据）。
+
+    适用于“哪家门店销量/订单量/营业额最多（最少）”等跨门店事实查询。
+    metric 可选：sales_volume（销量，默认）/ order_count / gmv。
+    """
+    metric = metric if metric in {"sales_volume", "order_count", "gmv"} else "sales_volume"
+    params = {
+        "days": max(days, 1), "start_date": start_date, "end_date": end_date,
+        "metric": metric, "top_n": max(1, min(top_n, 50)),
+    }
+    cached = cache_get("get_store_sales_ranking", params)
+    if cached is not None:
+        return cached
+
+    start, end = _resolve_range(start_date, end_date, params["days"])
+    try:
+        with get_session_factory()() as session:
+            rows = session.execute(
+                select(
+                    Order.store_id.label("store_id"),
+                    Store.store_name.label("store_name"),
+                    func.coalesce(func.sum(Order.quantity), 0).label("sales_volume"),
+                    func.count().label("order_count"),
+                    func.coalesce(func.sum(Order.total_amount), 0).label("gmv"),
+                )
+                .join(Store, Store.id == Order.store_id)
+                .where(
+                    Order.order_time >= datetime.combine(start, datetime.min.time()),
+                    Order.order_time < datetime.combine(end + timedelta(days=1), datetime.min.time()),
+                    Order.order_status == "completed",
+                )
+                .group_by(Order.store_id, Store.store_name)
+            ).all()
+        stores = [
+            {
+                "store_id": int(r.store_id),
+                "store_name": r.store_name,
+                "sales_volume": int(r.sales_volume or 0),
+                "order_count": int(r.order_count or 0),
+                "gmv": round(float(r.gmv or 0), 2),
+            }
+            for r in rows
+        ]
+        stores.sort(key=lambda item: item[metric], reverse=True)
+        for rank, item in enumerate(stores, 1):
+            item["rank"] = rank
+        result = {
+            "success": True,
+            "data": {
+                "period": f"{start.isoformat()} ~ {end.isoformat()}",
+                "metric": metric,
+                "stores": stores[:params["top_n"]],
+                "total_stores": len(stores),
+                "data_source": "MySQL",
+            },
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("门店销售排名查询失败：%s", exc)
+        result = {"success": False, "data": {}, "error": f"门店销售排名查询失败：{exc}"}
+    cache_set("get_store_sales_ranking", params, result)
     return result
 
 

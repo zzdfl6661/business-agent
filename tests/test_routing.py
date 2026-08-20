@@ -6,7 +6,15 @@
 """
 import pytest
 
-from agent.routing import DATA_KEYS, MARKET_KEYS, is_data_question, is_market_question, resolve_intent
+from agent.routing import (
+    DATA_KEYS,
+    MARKET_KEYS,
+    is_data_question,
+    is_market_question,
+    is_sales_ranking_question,
+    resolve_intent,
+    should_retrieve_operation_knowledge,
+)
 
 
 @pytest.mark.parametrize(
@@ -20,6 +28,7 @@ from agent.routing import DATA_KEYS, MARKET_KEYS, is_data_question, is_market_qu
         ("哪些门店排名靠前", "data"),
         ("团建套餐品类表现如何", "data"),
         ("店铺的客流和交易数据", "data"),
+        ("最近7天门店销量最多的是哪一家", "data"),
         # ---- 知识类（默认 RAG / 命中 KNOWLEDGE_KEYS）----
         ("我是新员工，每天上班时间是多少", "kb"),
         ("门店晋升需要什么条件", "kb"),
@@ -74,3 +83,11 @@ def test_routing_keyword_sets():
     from agent.routing import KNOWLEDGE_KEYS
 
     assert KNOWLEDGE_KEYS and all(k for k in KNOWLEDGE_KEYS)
+
+
+def test_sales_ranking_and_factual_data_retrieval_policy():
+    question = "最近7天门店销量最多的是哪一家"
+    assert is_sales_ranking_question(question)
+    assert is_market_question(question)
+    assert not should_retrieve_operation_knowledge(question, "data")
+    assert should_retrieve_operation_knowledge("营业额下降原因和优化建议", "data")
