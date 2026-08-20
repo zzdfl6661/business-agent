@@ -24,6 +24,7 @@ class AgentState(TypedDict, total=False):
     intent_type: str          # supervisor 路由标记：data=经营分析 / kb=知识问答
     store_id: int | None      # #6 门店解析结果（"XX店" → store_id，供 intent/analysis/经验层检索）
     query_result: dict
+    tool_plan: list[dict]    # 确定性数据查询计划；普通数据问答不再消耗一次 LLM 工具决策
     analysis_result: dict
     retrieval_docs: list
     pending_plans: list       # 待用户确认的执行计划（update_campaign_budget 生成，dry-run）

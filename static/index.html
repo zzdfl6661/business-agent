@@ -244,7 +244,7 @@ async function apiFetch(url, options) {
 }
 
 /* ---------------- LLM 通道下拉（#15 运行时切换，无需重启） ---------------- */
-const PROVIDER_NAMES = { deepseek: 'DeepSeek', openai: 'OpenAI', local: '本地模型', codebuddy: 'CodeBuddy' };
+const PROVIDER_NAMES = { deepseek: 'DeepSeek', openai_compatible: 'OpenAI 兼容模型', openai: 'OpenAI（兼容别名）', local: '本地模型', codebuddy: 'CodeBuddy' };
 const llmSel = document.getElementById('llmProvider');
 async function loadProviders() {
   try {
@@ -420,6 +420,9 @@ function renderMarkdown(md) {
 function renderKpis(m, question) {
   const ms = (m && m.metrics) || {};
   if (!ms || !Object.keys(ms).length) return '';
+  // 排名/客流等市场类问题不查销售数据 → metrics 全 0，渲染 ¥0 卡会误导（正文已含排名表）
+  const core = [ms.gmv, ms.order_count, ms.avg_order_value];
+  if (core.every(v => v == null || v === 0 || isNaN(v))) return '';
   const money = v => (v == null || isNaN(v)) ? '-' : '¥' + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
   const delta = (v) => v == null || isNaN(v) ? '' : (v > 0 ? `<span class="kd up">▲ +${v}%</span>` : v < 0 ? `<span class="kd down">▼ ${v}%</span>` : '<span class="kd flat">— 0%</span>');
   // 按用户问题关键词筛 KPI：只展示与问题相关的指标卡，避免"问 A 显示 B"的脱节
@@ -667,6 +670,10 @@ async function send() {
           progEl.style.display = 'none';
           // 修复：data 结构化链路无 token 事件，报告容器从未被显示（导出能看到、对话里却空白）
           if (repEl.style.display === 'none') repEl.style.display = '';
+          // 修复：优先用后端权威文本（done.report）——第三方流式模型（如商汤 sense nova）
+          // 的 token chunk 序列可能与最终内容不一致（缺字/换行丢失），打字机只作过程动画，
+          // 最终渲染必须用完整正确文本，否则出现"回答错乱/重复"
+          if (m.report) reportText = m.report;
           // #14：结构化五段直接渲染（data 链路）；否则回退 markdown 渲染（kb 链路）
           if (m.report_sections && Object.keys(m.report_sections).some(k => (m.report_sections[k] || []).length)) {
             repEl.innerHTML = renderKpis(m, m.user_question || q) + renderSectionsHtml(m.report_sections);
@@ -682,8 +689,7 @@ async function send() {
           const rid = m.request_id ? ` · #${m.request_id}` : '';
           metaEl.innerHTML = `${cost} · ⏱ ${(m.duration_ms / 1000).toFixed(1)}s${rid} · <a href="javascript:void(0)" onclick="exportChat(this)">导出</a>`;
           // 修复：data 结构化链路后端不发 token 事件 → 用 done.report 回填完整文本，
-          // 保证 history（会话持久化/导出）包含助手完整回答
-          if (m.report) reportText = m.report;
+          // 保证 history（会话持久化/导出）包含助手完整回答（reportText 已在上面优先覆盖）
           history.push({ role: 'user', content: q }, { role: 'assistant', content: reportText });
           history = history.slice(-MAX_HISTORY * 2);
         }

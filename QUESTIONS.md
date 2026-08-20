@@ -15,6 +15,51 @@
 
 ## 已修复问题
 
+### 2026-08-20 | Ragas 真实数据评测与 LangChain 兼容性修复
+
+- **现象/背景**：Ragas 评测入口已提交但未安装开发依赖，无法确认当前向量库的真实上下文质量；Ragas 0.2.15 仍引用已从 `langchain-community 0.4.x` 移除的 `chat_models.vertexai` 模块。
+- **根因/修改**：安装 `ragas==0.2.15`、`datasets` 等开发依赖；在 `scripts/eval_ragas.py` 增加仅作用于评测进程的 `ChatVertexAI` 兼容导入层，避免降级生产 LangChain 依赖；新增 `docs/10_ragas_eval_2026-08-20.md` 记录结果。
+- **影响范围**：仅 Ragas 开发评测，不改变生产 Docker 镜像和线上 LLM 通道。
+- **验证/决策**：基于当前 Chroma 与 21 条真实 golden set 完整评测，`Hit@5=90.5%`、`context_precision=0.5865`、`context_recall=0.7672`；少量 judge 请求超时，后续趋势比较需固定模型与超时策略。
+
+### 2026-08-20 | OpenAI-compatible 通道命名、Docker 生产骨架与 Ragas 评测入口
+
+- **现象/背景**：项目使用第三方 OpenAI-compatible 模型时复用 `openai` 配置名，容易误导；部署仍依赖 Windows 启动脚本，缺少 Linux 容器、数据卷和反向代理方案；RAG 只有 Hit@k 脚本，缺少上下文精度/召回的统一评测入口。
+- **根因/修改**（`config/settings.py`、`config/llm_factory.py`、`api/chat.py`、`static/index.html`、`Dockerfile`、`docker-compose.yml`、`deploy/nginx.conf`、`scripts/eval_ragas.py`、`docs/09_docker_deployment.md`）：
+  1. 新增 `openai_compatible` provider，支持独立的 `BIZ_OPENAI_COMPATIBLE_*` 配置；旧 `openai` 保留兼容映射，第三方模型不再被标识为官方 OpenAI；
+  2. 新增 Python 3.13 Docker 镜像、`app/mysql/nginx` Compose、Chroma/RAG/模型缓存卷和 SSE 反代配置；Windows Edge/Playwright、CodeBuddy、Milvus、Redis 不进入首版 Linux 部署；
+  3. 补充 `python-docx` 运行依赖，避免启动时加载 DOCX 知识文档失败；
+  4. 新增可选 `ragas` 开发依赖和 `scripts/eval_ragas.py`，评估 Context Precision/Context Recall；保留 `scripts/eval_rag.py` 的 Hit@k 作为来源命中回归指标。
+- **影响范围**：第三方 LLM 配置、Linux 部署、RAG 评测和运行依赖；现有 DeepSeek、旧 `openai` 配置仍可兼容运行。
+- **验证**：已完成 Python 语法级校验与配置静态检查；Docker 构建和真实 Ragas 评测需在安装 Docker/项目依赖、准备 MySQL 与 LLM Key 的环境执行。
+
+### 2026-08-19 | 前端报告渲染修复：第三方流式模型缺字/错乱 + 市场类问题 ¥0 KPI 误导
+
+- **现象/背景**：① 第三方 OpenAI 兼容流式模型（如商汤 SenseNova）的 token chunk 序列与最终内容不一致（缺字/换行丢失），前端打字机按增量渲染得到"回答错乱/重复"；② 排名/客流/交易等市场类问题不查销售数据，`metrics` 全 0，前端渲染出 ¥0 卡误导（正文已含排名表）。
+- **根因/修改**（`static/index.html`）：
+  1. done 事件携带的 `report` 为后端权威完整文本——最终渲染优先用 `m.report` 覆盖打字机增量，打字机仅作过程动画，保证历史持久化/导出内容与展示一致；
+  2. `renderKpis` 在 `gmv/order_count/avg_order_value` 全为空/0/NaN 时返回空字符串（隐藏 ¥0 KPI 卡）。
+- **影响范围**：前端报告渲染；kb/data 双链路 final report 均以 done.report 为准。
+- **验证**：商汤通道对话正常渲染完整文本；市场类问题不再显示 ¥0 KPI 卡。
+
+### 2026-08-19 | Windows GBK 控制台输出 UTF-8 兜底（打印 ✓/✅ 崩溃）
+
+- **现象/背景**：Windows 控制台默认 GBK 编码，脚本/服务打印 `✓/✅/❌` 等非 GBK 字符直接抛 `UnicodeEncodeError` 崩溃（实测于数据采集流程）。
+- **根因/修改**：`config/logging_setup.py::setup_logging` 与 `scripts/import_login_state.py` 入口处对 stdout/stderr 执行 `reconfigure(encoding="utf-8", errors="replace")`；重定向/非 TextIOWrapper 场景跳过。
+- **影响范围**：服务启动与数据采集脚本的中文/emoji 打印稳定性。
+- **验证**：数据采集流程（Edge 拉起/登录态注入/下载导入）全程打印正常，不再崩溃。
+
+### 2026-08-14 | 数据问答链路降本提速（确定性规划 + 上下文压缩 + RAG 按需改写）
+
+- **现象/背景**：常规数据问题即使最终会由 `analysis_node` 兜底查询，仍先经过一次 LLM 工具决策及可能的 ReAct 回环；会话历史与完整数据明细又会重复注入模型。知识问答则每次都执行 Query Rewrite + HyDE，明确制度名也要额外消耗一次 LLM，导致数据回复慢、token 偏高。
+- **根因/修改**（`agent/nodes.py`、`agent/state.py`、`tests/test_performance_paths.py`）：
+  1. 新增 `_build_data_tool_plan()`：营业额/订单类只查销售，推广类只查推广，排名类查对应市场指标；支持“最近 N 天/本月/昨天”时间窗，明确起止日期、预算调整和执行等高风险计划仍保留 LLM tool calling，避免猜测日期、campaign 或预算参数；
+  2. `AgentState` 新增 `tool_plan`，确定性计划执行后清空，防止回边重复查询；市场问题不再额外兜底查单店销售数据；
+  3. 数据工具规划模型只接收当前问题，不再携带历史报告；报告输入把销售数据压缩为 summary、近 7 日趋势、Top 3 商品、Top 5 品类，推广计划限制为 Top 3；数据报告最大输出由 3000 收紧到 1200 tokens；
+  4. kb 链路先以原问题检索；至少 2 条结果且最高相似度 ≥0.70 时直接生成回答，只有低置信/未命中才调用 Query Rewrite + HyDE 并行补召回。
+- **影响范围**：数据类首响、LLM 输入/输出 token、MySQL 聚合次数与知识问答延迟；预算调整等需确认的自动化路径保持原有安全语义。
+- **验证**：新增 `tests/test_performance_paths.py`，覆盖销售/推广/预算调整的查询规划与报告数据压缩；`python -m py_compile agent/nodes.py agent/state.py` 通过。当前全局 Python 缺少 `langchain_core`，pytest 在收集阶段无法导入项目依赖，待按 `requirements.lock` 建立项目虚拟环境后执行完整测试。
+
 ### 2026-08-14 | 报告结构化输出（#14，告别正则兜底与字段泄漏）
 
 - **现象/背景**：data 链路报告五段结构靠"prompt 自律 + 前端宽松正则"兜底，模型偶发吞字、泄漏内部字段名（如 `reply30=96.61%`，见 08-11 已知问题）。
@@ -243,6 +288,22 @@
 ---
 
 ## 功能优化
+
+### 2026-08-19 | OpenAI 通道支持自定义 base_url（第三方兼容端点接入）
+
+- **现象/背景**：`openai` 通道此前只连官方 `api.openai.com`，商汤 SenseNova 等第三方 OpenAI 兼容端点无法接入；若填了第三方 key 又未配置 base_url，ChatOpenAI 默认连官方地址 → key 无效 → 知识检索/报告全部失败。
+- **根因/修改**（`config/settings.py`、`config/llm_factory.py`、`.env.example`）：新增 `openai_base_url`（env `BIZ_OPENAI_BASE_URL`），`_build_llm` 的 openai 分支透传 `base_url`，留空回退官方；`.env.example` 补充注释。
+- **影响范围**：openai 通道可接任意 OpenAI 兼容端点；deepseek/codebuddy/local 通道不受影响。
+- **验证**：商汤 SenseNova 端点配置后对话/检索正常。
+
+### 2026-08-19 | 后端直接运行入口 + start-all.sh 一键启动完善
+
+- **现象/背景**：① 后端只能靠 uvicorn 命令行启动，VSCode F5 / 右键 Run Python File 无法直接运行；② `start-all.sh` 读取 .env 未剥离行尾 `# 注释`，且硬编码个人 Python 路径，换机器不可用。
+- **根因/修改**：
+  1. `main.py` 增加 `if __name__ == "__main__"` 入口（`uvicorn.run(app, host=127.0.0.1, port=8000)`）；
+  2. `start-all.sh`：`.env` 解析加 `strip_comment`（去行尾注释/空格）；Python 探测 `.venv/Scripts/python.exe → .venv/bin/python → PATH python`；`WB2API_DIR` 可被环境变量覆盖；顶部补使用备忘（一键启动/status/stop/分步启动/验证）。
+- **影响范围**：开发启动体验与脚本可移植性。
+- **验证**：`bash -n` 通过；一键 `./start-all.sh` 按 .env 自动拉起 8788 + 8000。
 
 ### 2026-08-14 | LLM 运行时切换 + 会话删除/导出 + 依赖锁定 + trace 修正（#15）
 

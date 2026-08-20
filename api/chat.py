@@ -577,7 +577,7 @@ def list_execute_plans() -> dict:
 # ============ LLM provider 运行时切换（#15） ============
 
 class LLMSwitchRequest(BaseModel):
-    provider: str = Field(..., min_length=1, max_length=32, description="目标 provider：deepseek/openai/local/codebuddy")
+    provider: str = Field(..., min_length=1, max_length=32, description="目标 provider：deepseek/openai_compatible/local/codebuddy")
 
 
 @router.get("/llm/providers")

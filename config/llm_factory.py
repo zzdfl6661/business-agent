@@ -4,7 +4,7 @@ LLM 多 Provider 工厂
 统一入口 create_llm()，业务代码只依赖 BaseChatModel，不感知具体 Provider。
 
 - deepseek : ChatDeepSeek（langchain-deepseek 官方包，原生 tool calling）
-- openai   : ChatOpenAI
+- openai_compatible : 任意 OpenAI-compatible 端点（openai 为兼容别名）
 - local    : ChatOpenAI 指向本地 OpenAI 兼容端点（vLLM / Ollama）
 - codebuddy: ChatOpenAI 指向 workbuddy2api 本地代理（复用 WorkBuddy 账号额度，原生 tool calling）
 
@@ -26,7 +26,7 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 # 支持的 provider 列表（用于 /api/llm/switch 校验与前端下拉）
-SUPPORTED_PROVIDERS = ("deepseek", "openai", "local", "codebuddy")
+SUPPORTED_PROVIDERS = ("deepseek", "openai_compatible", "local", "codebuddy")
 
 # 实例缓存：provider → BaseChatModel（按 provider 复用，避免每次调用新建）
 _instances: dict[str, BaseChatModel] = {}
@@ -36,7 +36,9 @@ _active_provider: str | None = None
 
 def get_active_provider() -> str:
     """当前生效的 provider（运行时切换优先，否则 .env 默认）。"""
-    return (_active_provider or settings.llm_provider).strip().lower()
+    provider = (_active_provider or settings.llm_provider).strip().lower()
+    # 兼容旧 .env 的 BIZ_LLM_PROVIDER=openai，统一对外显示为兼容端点。
+    return "openai_compatible" if provider == "openai" else provider
 
 
 def set_active_provider(provider: str | None) -> str:
@@ -50,6 +52,8 @@ def set_active_provider(provider: str | None) -> str:
         _active_provider = None
         return get_active_provider()
     p = provider.strip().lower()
+    if p == "openai":
+        p = "openai_compatible"
     if p not in SUPPORTED_PROVIDERS:
         raise ValueError(
             f"未知 LLM provider={provider!r}（可选：{' / '.join(SUPPORTED_PROVIDERS)}）"
@@ -68,7 +72,11 @@ def list_providers() -> dict:
         "active": get_active_provider(),
         "config": {
             "deepseek": {"model": settings.deepseek_model, "configured": bool(settings.deepseek_api_key)},
-            "openai": {"model": settings.openai_model, "configured": bool(settings.openai_api_key)},
+        "openai_compatible": {
+            "base_url": settings.openai_compatible_base_url or settings.openai_base_url or "https://api.openai.com/v1",
+            "model": settings.openai_compatible_model or settings.openai_model,
+            "configured": bool(settings.openai_compatible_api_key or settings.openai_api_key),
+        },
             "local": {"base_url": settings.local_base_url, "model": settings.local_model, "configured": True},
             "codebuddy": {"base_url": settings.codebuddy_base_url, "model": settings.codebuddy_model, "configured": True},
         },
@@ -125,16 +133,20 @@ def _build_llm(provider: str) -> BaseChatModel:
             http_client=_http_client(),  # 绕过环境代理，防间歇性 Connection error
         )
 
-    if provider == "openai":
-        if not settings.openai_api_key:
-            raise ValueError("BIZ_LLM_PROVIDER=openai 但未配置 BIZ_OPENAI_API_KEY，请填写 Key")
+    if provider in ("openai", "openai_compatible"):
+        api_key = settings.openai_compatible_api_key or settings.openai_api_key
+        model = settings.openai_compatible_model or settings.openai_model
+        base_url = (settings.openai_compatible_base_url or settings.openai_base_url).strip() or None
+        if not api_key:
+            raise ValueError("BIZ_LLM_PROVIDER=openai_compatible 但未配置兼容端点 API Key")
         from langchain_openai import ChatOpenAI
 
-        logger.info("LLM provider=openai, model=%s", settings.openai_model)
+        logger.info("LLM provider=openai_compatible, model=%s, base_url=%s", model, base_url or "(官方)")
         return ChatOpenAI(
-            model=settings.openai_model,
-            api_key=settings.openai_api_key,
+            model=model,
+            api_key=api_key,
             temperature=settings.llm_temperature,
+            base_url=base_url,
             http_client=_http_client(),
         )
 

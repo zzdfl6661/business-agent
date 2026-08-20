@@ -56,12 +56,15 @@ cp .env.example .env
 .venv/Scripts/python -m scripts.seed
 
 # 4. 启动 LLM 通道（仅 codebuddy 通道需要；DeepSeek 直连可跳过）
-cd /d/workbuddy2api && ./start-wb2api.sh start      # Git Bash
+#    端口需与 .env 的 BIZ_CODEBUDDY_BASE_URL 一致：8788=远程账号（当前默认）/ 8787=本机账号
+cd /d/workbuddy2api && ./start-wb2api-remote.sh start   # 8788 远程账号；本机账号改用 ./start-wb2api.sh start
 
 # 5. 启动服务（首次启动会下载 RAG 嵌入模型，约 90MB，一次性）
 .venv/Scripts/uvicorn main:app --reload --port 8000
 # 或使用项目脚本（管道方式启动，Windows 子进程兼容）：
 # ./start-backend.sh &
+# 推荐一键启动（按 .env 自动拉起 LLM 通道 + 后端）：
+# ./start-all.sh &
 
 # 6. 验证
 curl http://127.0.0.1:8000/health
@@ -149,6 +152,9 @@ BIZ_DEEPSEEK_MODEL=deepseek-v4-flash
 ```
 
 官方 OpenAI 兼容接口，原生 tool calling，无需任何本地服务。
+
+> 💡 **OpenAI 兼容端点**：`openai` 通道支持 `BIZ_OPENAI_BASE_URL` 指向任意 OpenAI 兼容端点
+> （商汤 SenseNova / vLLM / 中转服务等），留空则连官方 `api.openai.com`（需有效 Key）。
 
 ### 通道 B：CodeBuddy（workbuddy2api 本地代理）
 
@@ -244,10 +250,16 @@ FastAPI(/api/chat/stream)
 Business Agent/                    # 项目根目录（全部代码在根目录，无 backend/ 子目录）
 ├── README.md                      # 本文件
 ├── QUESTIONS.md                   # 问题与优化记录（已修复/功能优化/已知问题，维护约定见文末）
-├── main.py                        # FastAPI 入口（lifespan 初始化 MySQL + RAG ingest）
+├── main.py                        # FastAPI 入口（lifespan 初始化 MySQL + RAG ingest；支持 python main.py 直接运行）
 ├── requirements.txt               # 依赖清单
-├── .env / .env.example            # 环境变量（.env 含密钥，不入库）
+├── requirements.lock              # 依赖锁定版本（uv pip compile，#15）
+├── requirements-dev.txt           # 开发依赖（pytest / ruff）
+├── pytest.ini                     # pytest 配置
+├── .env / .env.example            # 环境变量（.env 含密钥，不入库；.env.example 为全量注释模板）
 ├── start-backend.sh               # 启动脚本（管道方式启动 uvicorn，Windows 子进程兼容）
+├── start-all.sh                   # 一键启动（按 .env 自动拉起 LLM 通道 8788/8787 + 后端 8000；status/stop）
+├── 08_交接问题清单_20260814.md    # 交接待办清单（#2-#15 落地记录）
+├── workbuddy2api通道部署包_20260812.zip  # CodeBuddy 通道部署包（可外发，见第四节）
 ├── docs/                          # 设计文档
 │   ├── 01_architecture.md         #   架构说明
 │   ├── 02_tech_stack.md           #   技术选型
@@ -295,7 +307,7 @@ Business Agent/                    # 项目根目录（全部代码在根目录�
 │   ├── edge_debug_profile/        # Edge 调试 profile（含登录态，不入库）
 │   └── scraped/                   # 爬取的经营业务报表（不入库）
 ├── scripts/                       # 建库/导入/采集/自测/RAG 评测脚本
-├── tests/                         # pytest 单测（路由矩阵/指标边界/工具契约/RAG 评测，#13）
+├── tests/                         # pytest 单测（路由矩阵/指标边界/工具契约/RAG 评测/数据查询规划，#13）
 ├── .github/workflows/ci.yml       # GitHub Actions（lint + pytest + MySQL service）
 ├── static/
 │   └── index.html                 # 前端单页（示例问题/流式/卡片化/KPI/执行计划确认/Token 输入）
@@ -322,42 +334,25 @@ Business Agent/                    # 项目根目录（全部代码在根目录�
 
 ---
 
-## 八、配置项（.env 全量）
+## 八、配置项（.env 速览，全量见 .env.example）
 
-```ini
-# ---------- LLM ----------
-BIZ_LLM_PROVIDER=deepseek          # deepseek / openai / local / codebuddy（无 Mock，未配置 Key 会报错）
-BIZ_DEEPSEEK_API_KEY=sk-xxx
-BIZ_DEEPSEEK_MODEL=deepseek-v4-flash
-BIZ_OPENAI_API_KEY=
-BIZ_OPENAI_MODEL=gpt-4o-mini
-BIZ_LOCAL_BASE_URL=http://localhost:11434/v1
-BIZ_LOCAL_MODEL=qwen2.5:14b
-BIZ_CODEBUDDY_BASE_URL=http://127.0.0.1:8787/v1
-BIZ_CODEBUDDY_MODEL=deepseek-v4-flash
-BIZ_CODEBUDDY_API_KEY=
-BIZ_LLM_TEMPERATURE=0.3
+> 全量配置（含逐项注释与可选值）以根目录 **`.env.example` 为唯一权威源**，`.env` 由它复制填写。
+> 常用项速览：
 
-# ---------- MySQL ----------
-BIZ_DB_HOST=127.0.0.1
-BIZ_DB_PORT=3306
-BIZ_DB_USER=root
-BIZ_DB_PASSWORD=<你的密码>
-BIZ_DB_NAME=business_agent
-BIZ_STORES_JSON=D:\path\stores.json
-
-# ---------- RAG ----------
-BIZ_VECTOR_STORE_TYPE=chroma       # chroma / milvus
-BIZ_CHROMA_DIR=./chroma_db
-BIZ_EMBEDDING_PROVIDER=fastembed_bge_zh   # chroma_default / fastembed_bge_zh / openai
-
-# ---------- 安全（API 鉴权） ----------
-BIZ_API_TOKEN=                     # 设置后 /api/* 需 Bearer Token；留空 = 关闭鉴权（开发模式）
-
-# ---------- 自动化执行（阶段二） ----------
-BIZ_PLAYWRIGHT_HEADLESS=true
-BIZ_OPS_PLATFORM_URL=http://localhost:3000/ops
-```
+| 分组 | 关键项 | 说明 |
+|---|---|---|
+| **LLM 通道** | `BIZ_LLM_PROVIDER` | `deepseek`（默认）/ `openai` / `local` / `codebuddy`；运行时可用页面右上角或 `POST /api/llm/switch` 切换 |
+| | `BIZ_DEEPSEEK_API_KEY` / `BIZ_DEEPSEEK_MODEL` | DeepSeek 直连（默认模型 `deepseek-v4-flash`） |
+| | `BIZ_OPENAI_API_KEY` / `BIZ_OPENAI_MODEL` / `BIZ_OPENAI_BASE_URL` | OpenAI / 兼容端点（SenseNova/vLLM 等；base_url 留空=官方） |
+| | `BIZ_CODEBUDDY_BASE_URL` / `BIZ_CODEBUDDY_MODEL` | workbuddy2api 本地代理，`8788`=远程账号 ｜ `8787`=本机账号 |
+| | `BIZ_LOCAL_BASE_URL` / `BIZ_LOCAL_MODEL` | 本地 OpenAI 兼容端点（Ollama/vLLM） |
+| | `BIZ_LLM_TEMPERATURE` | 生成温度，默认 `0.3` |
+| **MySQL** | `BIZ_DB_HOST/PORT/USER/PASSWORD/NAME` | 业务库（`business_agent`）；`BIZ_STORES_JSON`=门店主数据 JSON 路径 |
+| **RAG** | `BIZ_VECTOR_STORE_TYPE` | `chroma` / `milvus` |
+| | `BIZ_CHROMA_DIR` | 向量库目录，默认 `./chroma_db` |
+| | `BIZ_EMBEDDING_PROVIDER` | `chroma_default` / `fastembed_bge_zh`（推荐）/ `fastembed_bge_m3` / `openai` |
+| **安全** | `BIZ_API_TOKEN` | 设置后 `/api/*` 需 `Bearer` / `X-API-Token`；留空=关闭鉴权（开发模式） |
+| **自动化执行** | `BIZ_PLAYWRIGHT_HEADLESS` / `BIZ_OPS_PLATFORM_URL` | 阶段二后台执行钩子 |
 
 ---
 
@@ -368,7 +363,8 @@ BIZ_OPS_PLATFORM_URL=http://localhost:3000/ops
 | 服务 | 端口 | 启动 |
 |---|---|---|
 | 项目后端 | 8000 | `.venv/Scripts/uvicorn main:app --reload --port 8000`（根目录执行；或 `./start-backend.sh &`） |
-| workbuddy2api（LLM 通道） | 8788（远程账号）/ 8787（本机） | `cd /d/workbuddy2api && ./start-wb2api.sh start` |
+| 一键启动（LLM 通道 + 后端） | 8788/8787 + 8000 | `./start-all.sh`（`status` 查状态 / `stop` 停后端；LLM 通道按 .env 的 provider 与端口自动拉起） |
+| workbuddy2api（LLM 通道） | 8788（远程账号）/ 8787（本机） | `cd /d/workbuddy2api && ./start-wb2api-remote.sh start`（8788）｜ `./start-wb2api.sh start`（8787） |
 | codebuddy-proxy（可选，纯聊天） | 19090 | `cd /d/codebuddy-proxy && ./start-proxy.sh start` |
 
 ### 9.2 常见问题
@@ -397,13 +393,13 @@ BIZ_OPS_PLATFORM_URL=http://localhost:3000/ops
 | 阶段 | 状态 | 内容 |
 |---|---|---|
 | **Phase 1** | ✅ 完成 | MySQL 真实数据 + LLM 双通道 + Chroma 混合检索 RAG 全接通 |
-| **Phase 2** | 🚧 进行中 | Supervisor 多 Agent（✅ 已上线：经营分析 + 知识问答）· **自动化执行授权制（✅ 已上线：执行计划 dry-run + 用户确认，`POST /api/execute/confirm`）** · Playwright 真实后台执行钩子 · Docker 部署 |
+| **Phase 2** | 🚧 进行中 | Supervisor 多 Agent（✅ 已上线：经营分析 + 知识问答）· **自动化执行授权制（✅ 已上线：执行计划 dry-run + 用户确认，`POST /api/execute/confirm`）** · Playwright 真实后台执行钩子 · **Docker 生产验证骨架（✅ app + mysql + nginx；Windows 采集链路独立）** |
 | **Phase 3** | 📋 规划 | 自动执行 Agent 独立化 · 多轮追问澄清 · 知识库内容运营（完整员工手册入库）· bge-reranker 精排 |
 
 ## 十一、技术栈
 
-Python 3.13 · FastAPI · LangGraph 1.2 / LangChain 1.x · DeepSeek / CodeBuddy(workbuddy2api) / OpenAI / 本地模型 ·
-SQLAlchemy 2 + MySQL · Pandas/NumPy · Chroma + fastembed(bge-zh) + BM25 · Playwright（阶段二）· Docker（阶段二）
+Python 3.13 · FastAPI · LangGraph 1.2 / LangChain 1.x · DeepSeek / OpenAI-compatible / CodeBuddy(workbuddy2api) / 本地模型 ·
+SQLAlchemy 2 + MySQL · Pandas/NumPy · Chroma + fastembed(bge-zh) + BM25 · Ragas（开发评测）· Playwright（Windows 采集）· Docker
 
 > ⚠️ **LangChain 已 1.0 GA**：本项目统一使用 1.x API（`StateGraph` + subgraph + ToolNode），勿参考 0.2/0.3 旧教程。
 > 版本锁定：langgraph==1.2.*、langchain==1.3.*、langchain-deepseek==1.1.*、langchain-community>=0.3,<1.0（community 未跟随 1.0 版本号）。

@@ -30,7 +30,15 @@ def setup_logging(level: int = logging.INFO) -> None:
 
     #8：formatter 带 request_id 字段（RequestIdFilter 从 contextvars 注入），
     全链路日志可依据 request_id 串联（前端 trace 亦展示）。
+
+    Windows GBK 控制台修复：stdout/stderr 强制 UTF-8 + errors=replace——
+    否则打印 ✓/✅/❌ 等字符直接 UnicodeEncodeError 崩溃（实测于数据采集流程）。
     """
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001 非 TextIOWrapper（重定向等）时跳过
+            pass
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()

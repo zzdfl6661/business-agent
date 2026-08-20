@@ -25,11 +25,19 @@ class Settings(BaseSettings):
     )
 
     # ---------- LLM ----------
-    llm_provider: str = "deepseek"            # deepseek / openai / local / codebuddy
+    llm_provider: str = "deepseek"            # deepseek / openai_compatible / openai(alias) / local / codebuddy
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"  # 兼容旧模型名 deepseek-chat，可 env 覆盖
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    # OpenAI 兼容端点 base_url（可指向商汤 SenseNova / vLLM / 中转等；
+    # 留空 = 官方 api.openai.com）。注意：商汤等第三方端点必须显式配置，
+    # 否则 ChatOpenAI 默认连官方地址，key 无效 → LLM 全部失败
+    openai_base_url: str = ""
+    # 推荐的新命名；为空时兼容读取 BIZ_OPENAI_* 旧配置。
+    openai_compatible_api_key: str = ""
+    openai_compatible_model: str = ""
+    openai_compatible_base_url: str = ""
     local_base_url: str = "http://localhost:11434/v1"
     local_model: str = "qwen2.5:14b"
     # CodeBuddy 通道（workbuddy2api 本地代理，支持原生 tool calling；与 DeepSeek 通道并存可切换）

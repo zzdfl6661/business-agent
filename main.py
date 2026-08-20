@@ -81,3 +81,11 @@ def health() -> dict:
         "llm_provider": settings.llm_provider,
         "database": check_connection(),
     }
+
+
+# 直接运行入口：python main.py（或 VSCode 右键 Run Python File / F5）
+# 注意：走 codebuddy 通道时需先启动 workbuddy2api（8788/8787），见 start-all.sh
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)

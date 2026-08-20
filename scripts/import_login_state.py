@@ -16,7 +16,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
+
+# Windows GBK 控制台打印 ✓/✅ 等字符会 UnicodeEncodeError 崩溃（实测）；强制 UTF-8 兜底
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001
+        pass
 
 from playwright.sync_api import sync_playwright
 

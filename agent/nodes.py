@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 # ToolMessage 截断长度：完整工具结果在 state.query_result，消息里只留摘要防 token 爆炸
 TOOL_MESSAGE_MAX_CHARS = 1500
+DATA_REPORT_MAX_TOKENS = 1200
+RAG_REWRITE_TRIGGER_SCORE = 0.70
 
 # 工具名 → query_result 键（结构化存放供分析节点确定性读取）
 _QUERY_KEYS = {"get_sales_data": "sales", "get_campaign_data": "campaign"}
@@ -101,6 +103,18 @@ def intent_node(state: dict) -> dict:
         logger.info("非数据类问题（默认走 RAG 知识问答）：%s", question[:60])
         return {"messages": [AIMessage(content="知识类问题，跳过数据查询，直接检索知识库回答")]}
 
+    # 确定性计划完成后直接进入分析，不能在 tools → intent 回边重复计划查询。
+    if state.get("query_result") and not getattr((state.get("messages") or [None])[-1], "tool_calls", None):
+        return {"messages": [AIMessage(content="数据查询完成，进入确定性分析")]}
+
+    # 常规指标查询的工具集合及参数可以由规则稳定确定。原实现即使 LLM 不调用工具，
+    # analysis_node 也会再兜底查 sales/campaign，因此这一次 ReAct 决策既慢又贵。
+    # 涉及执行计划的请求仍保留 LLM tool calling，避免擅自猜测 campaign_id/预算。
+    planned = _build_data_tool_plan(question, state.get("store_id"))
+    if planned is not None:
+        logger.info("确定性数据查询计划：%s", [p["name"] for p in planned])
+        return {"tool_plan": planned}
+
     llm = create_llm().bind_tools(ALL_TOOLS)
     messages = list(state.get("messages", []) or [])
     # 门店解析结果注入（#6）："XX店营业额"不再让 LLM 猜 store_id=1
@@ -108,9 +122,10 @@ def intent_node(state: dict) -> dict:
     if store_id:
         hint = HumanMessage(content=f"（用户问的是 {store_id} 号门店，请优先以 store_id={store_id} 查询相关数据；若数据工具不支持该门店则如实说明）")
         logger.info("intent 注入目标门店：store_id=%s", store_id)
-        response = llm.invoke([SystemMessage(content=INTENT_SYSTEM_PROMPT)] + messages + [hint])
+        response = llm.invoke([SystemMessage(content=INTENT_SYSTEM_PROMPT)] + messages[-1:] + [hint])
     else:
-        response = llm.invoke([SystemMessage(content=INTENT_SYSTEM_PROMPT)] + messages)
+        # 数据查询不需要把历史报告再送进工具规划模型；追问所需上下文由最终报告节点处理。
+        response = llm.invoke([SystemMessage(content=INTENT_SYSTEM_PROMPT)] + messages[-1:])
     return {"messages": [response]}
 
 
@@ -119,7 +134,7 @@ def route_after_intent(state: dict) -> str:
     """条件边：最后一条消息是否请求工具。"""
     messages = state.get("messages", []) or []
     last = messages[-1] if messages else None
-    if getattr(last, "tool_calls", None):
+    if state.get("tool_plan") or getattr(last, "tool_calls", None):
         return "tools"
     return "analysis"
 
@@ -131,6 +146,52 @@ def _tool_by_name(name: str):
     return None
 
 
+def _build_data_tool_plan(question: str, store_id: int | None) -> list[dict] | None:
+    """为非执行型数据问题生成确定性查询计划。
+
+    返回 None 表示必须交给 LLM（目前仅预算调整等有副作用的计划生成）。返回空列表
+    不使用，保证普通问题至少会查询一种真实业务数据。
+    """
+    q = (question or "").lower()
+    if any(k in q for k in ("调整", "修改", "变更", "执行", "提高预算", "降低预算", "增加预算", "减少预算")):
+        return None
+    # 明确起止日期交给 LLM 提取 start_date/end_date，避免规则解析造成口径错误。
+    if re.search(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", q):
+        return None
+
+    sid = store_id or 1
+    days = _extract_query_days(q)
+    market = is_market_question(q)
+    campaign_words = ("推广", "广告", "投放", "roi", "点击", "花费", "消耗", "转化")
+    sales_words = ("营业额", "gmv", "销售额", "营收", "收入", "订单", "单量", "客单价", "环比", "同比", "增长", "下降", "趋势", "金额")
+    plan: list[dict] = []
+    if market:
+        plan = [
+            {"name": "get_store_ranking", "args": {"top_n": 10}},
+            {"name": "get_traffic_data", "args": {"rank": True}},
+            {"name": "get_transaction_data", "args": {"rank": True}},
+            {"name": "get_consult_data", "args": {"rank": True}},
+        ]
+    else:
+        if any(k in q for k in sales_words):
+            plan.append({"name": "get_sales_data", "args": {"store_id": sid, "days": days}})
+        if any(k in q for k in campaign_words):
+            plan.append({"name": "get_campaign_data", "args": {"store_id": sid, "days": days}})
+    return plan or [{"name": "get_sales_data", "args": {"store_id": sid, "days": days}}]
+
+
+def _extract_query_days(question: str) -> int:
+    """提取常见相对时间窗；无法识别时保持历史默认 7 天。"""
+    match = re.search(r"(?:最近|近|过去)(\d{1,3})(?:天|日)", question)
+    if match:
+        return max(1, min(int(match.group(1)), 365))
+    if "本月" in question or "这个月" in question:
+        return 30
+    if "昨天" in question:
+        return 1
+    return 7
+
+
 def tools_node(state: dict) -> dict:
     """
     自定义工具执行节点（替代默认 ToolNode）：
@@ -138,8 +199,9 @@ def tools_node(state: dict) -> dict:
     - messages 中仅保留截断版 ToolMessage（防止 890 个推广等大结果反复重发撑爆 token）
     """
     messages = list(state.get("messages", []) or [])
-    last = messages[-1]
-    tool_calls = getattr(last, "tool_calls", None) or []
+    last = messages[-1] if messages else None
+    planned_calls = list(state.get("tool_plan") or [])
+    tool_calls = planned_calls or (getattr(last, "tool_calls", None) or [])
     query_result = dict(state.get("query_result", {}) or {})
     pending_plans = list(state.get("pending_plans", []) or [])
     tool_messages: list[ToolMessage] = []
@@ -185,9 +247,11 @@ def tools_node(state: dict) -> dict:
         content = json.dumps(result, ensure_ascii=False, default=str)
         if len(content) > TOOL_MESSAGE_MAX_CHARS:
             content = content[:TOOL_MESSAGE_MAX_CHARS] + "…(结果已截断，完整数据见分析环节)"
-        tool_messages.append(ToolMessage(content=content, tool_call_id=tc["id"], name=tc["name"]))
+        # 确定性计划不回到 LLM，无需构造 ToolMessage；这也避免把工具结果再注入上下文。
+        if not planned_calls:
+            tool_messages.append(ToolMessage(content=content, tool_call_id=tc["id"], name=tc["name"]))
 
-    return {"messages": tool_messages, "query_result": query_result, "pending_plans": pending_plans}
+    return {"messages": tool_messages, "query_result": query_result, "pending_plans": pending_plans, "tool_plan": []}
 
 
 # ---------------------------------------------------------------- analysis
@@ -207,12 +271,14 @@ def analysis_node(state: dict) -> dict:
         logger.info("知识类问题：分析节点跳过数据查询")
         return {"analysis_result": {"data": {}, "factors": [], "metrics": {}}}
 
-    if not sales:
+    if not sales and not is_market_question(state.get("user_question", "") or ""):
         # 门店解析结果优先（#6），默认 1 号店
         store_id = state.get("store_id") or 1
         logger.info("未获取到工具调用结果，由分析节点直接查询数据（store_id=%s, days=7）", store_id)
         sales = get_sales_data.invoke({"store_id": store_id, "days": 7})
-    if not campaign:
+    # 仅当问题确实涉及推广或 LLM 主动取过推广数据时才查，避免销售问答额外聚合一份推广报表。
+    if not campaign and any(k in (state.get("user_question", "") or "").lower()
+                            for k in ("推广", "广告", "投放", "roi", "点击", "花费", "消耗", "转化")):
         campaign = get_campaign_data.invoke({"store_id": state.get("store_id") or 1})
 
     analysis = analysis_business_data.invoke(
@@ -307,8 +373,7 @@ def rag_node(state: dict) -> dict:
     """知识检索：双路检索（知识层用纯问题，避免经营结论稀释知识类查询；
     经验层带分析结论，保证历史报告相关性）。
 
-    #7 优化：kb 链路 4 路检索（原问题 BM25 + 改写×2 + HyDE）改 asyncio.gather **并行**执行
-    （旧实现串行，kb 问答 8.6s 中检索占比高）。
+    低置信知识问题才启用 Query Rewrite + HyDE，并行补充召回；明确命中时只走原问题检索。
     """
     question = state.get("user_question", "")
     analysis = (state.get("analysis_result") or {}).get("data", {}) or {}
@@ -320,37 +385,45 @@ def rag_node(state: dict) -> dict:
     #   解决"公司有多少门店"这类疑问句与文档陈述句的语义鸿沟
     # - data 链路：保持纯原问题（经营结论不被稀释）
     if state.get("intent_type") == "kb":
-        rewritten, hyde = _rewrite_query(question)
-        cands = [question] + [q for q in rewritten if q and q != question]
-        if hyde:
-            cands.append(hyde)
+        # 大多数明确制度名/专有名词可直接命中。先做一次无 LLM 的原问题检索，
+        # 低置信度时才支付 Query Rewrite + HyDE 的额外模型调用成本。
+        raw_docs = search_operation_knowledge.invoke({"query": question, "top_k": 3})
+        best_score = max((float(d.get("score") or 0) for d in raw_docs), default=0.0)
+        if len(raw_docs) >= 2 and best_score >= RAG_REWRITE_TRIGGER_SCORE:
+            docs = _dedup_docs(raw_docs, 5)
+            logger.info("kb 原问题高置信命中：%s 条，最高分 %.3f，跳过改写", len(docs), best_score)
+        else:
+            rewritten, hyde = _rewrite_query(question)
+            cands = [q for q in rewritten if q and q != question]
+            if hyde:
+                cands.append(hyde)
 
-        async def _parallel_retrieve() -> list[dict]:
-            async def _one(q: str) -> list[dict]:
-                try:
-                    return await asyncio.to_thread(
-                        search_operation_knowledge.invoke, {"query": q, "top_k": 3}
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("检索 %s 失败：%s", q[:30], exc)
-                    return []
+            async def _parallel_retrieve() -> list[dict]:
+                async def _one(q: str) -> list[dict]:
+                    try:
+                        return await asyncio.to_thread(
+                            search_operation_knowledge.invoke, {"query": q, "top_k": 3}
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("检索 %s 失败：%s", q[:30], exc)
+                        return []
 
-            pooled = await asyncio.gather(*[_one(q) for q in cands[:4]])
-            return [d for batch in pooled for d in batch]
+                pooled = await asyncio.gather(*[_one(q) for q in cands[:3]])
+                return [d for batch in pooled for d in batch]
 
-        try:
-            pooled = asyncio.run(_parallel_retrieve())
-        except Exception as exc:  # noqa: BLE001 极端情况（无事件循环等）退串行
-            logger.warning("kb 并行检索失败，退串行：%s", exc)
-            pooled = []
-            for q in cands[:4]:
-                try:
-                    pooled.extend(search_operation_knowledge.invoke({"query": q, "top_k": 3}))
-                except Exception as exc2:  # noqa: BLE001
-                    logger.warning("检索 %s 失败：%s", q[:30], exc2)
-        docs = _dedup_docs(pooled, 6)
-        logger.info("kb 检索：%s 路 query（原问题+改写%s+HyDE%s）并行 → %s 条去重",
-                    len(cands), len(rewritten), "✓" if hyde else "✗", len(docs))
+            try:
+                pooled = asyncio.run(_parallel_retrieve())
+            except Exception as exc:  # noqa: BLE001 极端情况（无事件循环等）退串行
+                logger.warning("kb 并行检索失败，退串行：%s", exc)
+                pooled = []
+                for q in cands[:3]:
+                    try:
+                        pooled.extend(search_operation_knowledge.invoke({"query": q, "top_k": 3}))
+                    except Exception as exc2:  # noqa: BLE001
+                        logger.warning("检索 %s 失败：%s", q[:30], exc2)
+            docs = _dedup_docs(list(raw_docs) + pooled, 6)
+            logger.info("kb 低置信检索：原问题 + 改写%s + HyDE%s → %s 条去重",
+                        len(rewritten), "✓" if hyde else "✗", len(docs))
     else:
         docs = search_operation_knowledge.invoke({"query": question, "top_k": 5})
 
@@ -530,26 +603,36 @@ def _report_structured(state: dict, llm, messages: list) -> dict:
     sections: dict | None = None
     try:
         structured_llm = llm.with_structured_output(ReportSections)
-        result = structured_llm.invoke(messages)
+        result = structured_llm.invoke(messages, max_tokens=DATA_REPORT_MAX_TOKENS)
         sections = result.model_dump() if hasattr(result, "model_dump") else dict(result or {})
         if not sections:
             raise ValueError("with_structured_output 返回空")
     except Exception as exc:  # noqa: BLE001
         logger.warning("结构化方案一（with_structured_output）失败，转方案二（prompt JSON）：%s", str(exc)[:120])
         try:
-            response = llm.invoke(messages, max_tokens=3000)
+            response = llm.invoke(messages, max_tokens=DATA_REPORT_MAX_TOKENS)
             text = response.content if isinstance(response.content, str) else str(response.content)
             sections = _parse_report_sections(text)
         except Exception as exc2:  # noqa: BLE001 连 prompt JSON 也失败 → 流式 markdown
             logger.warning("结构化方案二（prompt JSON）失败，回退流式 markdown：%s", str(exc2)[:120])
-            report = _stream_report(llm, messages, max_tokens=3000)
-            return {"final_report": _refresh_prefix(state, report)}
+            report = _stream_report(llm, messages, max_tokens=DATA_REPORT_MAX_TOKENS)
+            # 兜底再结构化：模型可能把 JSON 当 markdown 原样输出（第三方流式不稳），
+            # 若仍能解析出五段 → 渲染卡片；否则保留 markdown 文本
+            try:
+                sec = _parse_report_sections(report)
+                return {"final_report": _refresh_prefix(state, _sections_to_markdown(sec)), "report_sections": sec}
+            except Exception:  # noqa: BLE001 确非 JSON → 原样 markdown
+                return {"final_report": _refresh_prefix(state, report)}
 
     report = _sections_to_markdown(sections).strip()
     if not report:
         logger.warning("结构化输出为空，回退流式 markdown")
-        report = _stream_report(llm, messages, max_tokens=3000)
-        return {"final_report": _refresh_prefix(state, report)}
+        report = _stream_report(llm, messages, max_tokens=DATA_REPORT_MAX_TOKENS)
+        try:
+            sec = _parse_report_sections(report)
+            return {"final_report": _refresh_prefix(state, _sections_to_markdown(sec)), "report_sections": sec}
+        except Exception:  # noqa: BLE001 确非 JSON → 原样 markdown
+            return {"final_report": _refresh_prefix(state, report)}
 
     report = _refresh_prefix(state, report)
     _ingest_report_to_kb(report, state)  # 经验层：经营诊断报告自动入库
@@ -562,7 +645,7 @@ def report_node(state: dict) -> dict:
 
     - 知识类问题（制度/手册/话术）：口语化 markdown（流式），不入经营经验层（#14）
     - 经营诊断：**结构化输出**五段 JSON（#14，前端直接渲染）+ 确定性转 markdown
-    max_tokens=3000：正文受 prompt 约束；预留推理链空间。
+    数据报告最大输出 1200 tokens：正文受 600 字约束，限制异常推理/重试成本。
     """
     question = state.get("user_question", "") or ""
     # 知识问答判定与 supervisor 保持一致（#6 统一路由）：resolve_intent=="kb" → 知识问答模板
@@ -673,12 +756,22 @@ def _build_report_input(state: dict) -> str:
         }
         return json.dumps(summary, ensure_ascii=False, default=str)
 
+    sales = query_result.get("sales", {}) or {}
+    sales_data = sales.get("data", {}) if isinstance(sales, dict) else {}
+    # 报告只需趋势、KPI 与少量结构性明细；完整日表/商品表留在 state 供确定性分析，
+    # 不再重复送入 LLM 上下文。
+    sales_trim = {
+        "summary": sales_data.get("summary", {}),
+        "daily": (sales_data.get("daily", []) or [])[-7:],
+        "top_products": (sales_data.get("top_products", []) or [])[:3],
+        "category_breakdown": (sales_data.get("category_breakdown", []) or [])[:5],
+    }
     campaign = query_result.get("campaign", {}) or {}
     campaign_data = campaign.get("data", {}) if isinstance(campaign, dict) else {}
     campaigns = campaign_data.get("campaigns", []) or []
     # 保留汇总字段 + Top10（压缩成本）
     campaign_trim = dict(campaign_data)
-    campaign_trim["campaigns"] = campaigns[:10]
+    campaign_trim["campaigns"] = campaigns[:3]
     campaign_trim["campaign_total_count"] = len(campaigns)
 
     # 数据刷新结果摘要（供报告说明"已刷新到最新"）
@@ -693,7 +786,7 @@ def _build_report_input(state: dict) -> str:
     summary = {
         "user_question": question,
         "query_result": {
-            "sales": query_result.get("sales", {}),
+            "sales": sales_trim,
             "campaign": campaign_trim,
             "traffic": _trim_market(query_result.get("get_traffic_data")),
             "transaction": _trim_market(query_result.get("get_transaction_data")),

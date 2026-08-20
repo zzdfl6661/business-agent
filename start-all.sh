@@ -1,27 +1,37 @@
-#!/usr/bin/env bash
-# ============================================================
-# Business Agent 一键启动：LLM 通道（workbuddy2api）+ 后端
-# ============================================================
-# 解决"启动项目要全部启动"：自动读取 .env 的 BIZ_LLM_PROVIDER /
-# BIZ_CODEBUDDY_BASE_URL，若走 codebuddy 通道则先拉起对应端口实例，
-# 再以管道方式启动后端（8000）。
-#
-# 用法（Git Bash）:
-#   ./start-all.sh            # 前台：LLM 通道(若需) + 后端
-#   ./start-all.sh &          # 后台运行（后端日志 logs/server_uvicorn.log）
-#   ./start-all.sh status     # 查看各服务状态
-#   ./start-all.sh stop       # 停止后端（LLM 通道由 start-wb2api-*.sh stop 管理）
+# ============ 项目启动备忘（在 VSCode 终端切换到 Git Bash 后执行） ============
+# 进入项目目录
+#cd "/d/agent learning/Business  Agent"
+
+# ① 一键启动全部（自动拉起 LLM 通道 8788 + 后端 8000）——推荐
+# ./start-all.sh
+#    想后台运行（终端可关）：
+# ./start-all.sh &
+
+# ② 查看状态 / 停止
+# ./start-all.sh status                          # 看 8788 与 8000 是否就绪
+# ./start-all.sh stop                            # 停后端 8000
+# cd /d/workbuddy2api && ./start-wb2api-remote.sh stop   # 停 LLM 通道 8788
+
+# ③ 分开启动（等价于一键，拆开做）：
+# cd /d/workbuddy2api && ./start-wb2api-remote.sh start   # 先起 8788（10 秒内就绪）
+# cd "/d/agent learning/Business  Agent" && ./start-backend.sh   # 再起后端 8000
+
+# ④ 验证
+# curl http://127.0.0.1:8788/health   # 应返回 {"status":"ok",...}
+# curl http://127.0.0.1:8000/health   # 应返回 {"status":"ok",...,"database":true}
+
 # ============================================================
 set -u
 cd "$(dirname "$0")"
 
-WB2API_DIR="D:/workbuddy2api"
+WB2API_DIR="${WB2API_DIR:-D:/workbuddy2api}"   # 可用环境变量覆盖（其他机器 workbuddy2api 所在路径）
 PORT_8788="8788"
 PORT_8787="8787"
 
-# ---------- 读取 .env ----------
-LLM_PROVIDER=$(grep -E "^BIZ_LLM_PROVIDER=" .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \r')
-CODEBUDDY_URL=$(grep -E "^BIZ_CODEBUDDY_BASE_URL=" .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \r')
+# ---------- 读取 .env（去掉行尾 # 注释） ----------
+strip_comment() { echo "$1" | cut -d# -f1 | tr -d ' \r'; }
+LLM_PROVIDER=$(strip_comment "$(grep -E "^BIZ_LLM_PROVIDER=" .env 2>/dev/null | head -1 | cut -d= -f2-)")
+CODEBUDDY_URL=$(strip_comment "$(grep -E "^BIZ_CODEBUDDY_BASE_URL=" .env 2>/dev/null | head -1 | cut -d= -f2-)")
 [ -z "$LLM_PROVIDER" ] && LLM_PROVIDER="deepseek"
 echo "[1/3] BIZ_LLM_PROVIDER=$LLM_PROVIDER  BIZ_CODEBUDDY_BASE_URL=${CODEBUDDY_URL:-（未配置）}"
 
@@ -76,6 +86,9 @@ if curl -s -m 3 http://127.0.0.1:8000/health 2>/dev/null | grep -q '"status":"ok
 else
   echo "[3/3] 启动后端 :8000（管道方式）…"
   mkdir -p logs
-  PYTHON="C:/Users/z'z/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
+  # Python 探测：优先项目虚拟环境（README 快速开始），未建 venv 时回退 PATH 中的 python
+  if [ -x ".venv/Scripts/python.exe" ]; then PYTHON=".venv/Scripts/python.exe"
+  elif [ -x ".venv/bin/python" ]; then PYTHON=".venv/bin/python"
+  else PYTHON="python"; fi
   exec "$PYTHON" -m uvicorn main:app --host 127.0.0.1 --port 8000 2>&1 | tee -a logs/server_uvicorn.log
 fi
