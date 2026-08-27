@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from tools import database_tool, analysis_tool, rag_tool, browser_tool, market_data_tool
+from tools import database_tool, analysis_tool, rag_tool, market_data_tool
 
 # 聚合注册：意图节点 bind_tools 与 ToolNode 共用
 # 注意：refresh_market_data（数据采集）不在此列——数据下载改为前端按钮驱动
@@ -23,7 +23,6 @@ ALL_TOOLS: list = [
     market_data_tool.get_store_ranking,
     analysis_tool.analysis_business_data,
     rag_tool.search_operation_knowledge,
-    browser_tool.update_campaign_budget,
 ]
 
 __all__ = ["ALL_TOOLS"]

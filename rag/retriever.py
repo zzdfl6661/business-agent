@@ -200,8 +200,12 @@ class ChromaClient(VectorStoreClient):
     def _expand_parent(self, result: dict) -> None:
         """命中子块 → 回查父块全文替换返回内容（优先旧数据 parent_content，其次 parent_docs 库）。"""
         meta = result.get("metadata") or {}
+        matched_content = result.get("content", "")
         parent = meta.get("parent_content")  # 兼容旧结构（无冗余存储前的数据）
         if parent:
+            # 保留真正命中的子块；表格按行入库后，报告应优先使用它，
+            # 避免 parent 内容截断时把目标行丢掉。
+            result["matched_content"] = matched_content
             result["content"] = parent
             result["is_child"] = True
             return
@@ -211,6 +215,7 @@ class ChromaClient(VectorStoreClient):
                 got = self._parent_col.get(ids=[str(pid)], include=["documents"])
                 docs = got.get("documents") or []
                 if docs and docs[0]:
+                    result["matched_content"] = matched_content
                     result["content"] = docs[0]
                     result["is_child"] = True
             except Exception as exc:  # noqa: BLE001

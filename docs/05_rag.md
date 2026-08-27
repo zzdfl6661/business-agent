@@ -8,7 +8,8 @@
 ```
 ┌─────────────┐   ┌──────────────┐   ┌───────────┐   ┌───────────┐   ┌──────────┐   ┌─────┐
 │ 文档上传     │→│ 解析+切分      │→│ Embedding │→│ 向量库     │→│ Retriever │→│ LLM │
-│ (md/pdf/txt)│  │ RecursiveText │  │ 工厂       │  │ Chroma/   │  │ top_k+阈值│  │ 生成│
+│ md/pdf/txt   │  │ RecursiveText │  │ 工厂       │  │ Chroma/   │  │ top_k+阈值│  │ 生成│
+│ docx/csv/xlsx│  │ +表格转文本  │  │            │  │ Milvus    │  │           │  │     │
 └─────────────┘   └──────────────┘   └───────────┘   │ Milvus    │   └──────────┘   └─────┘
                                                        └───────────┘
 ```
@@ -25,7 +26,7 @@
 | 门店薪资绩效管理办法.docx | 薪资构成、绩效奖金规则 | 薪资绩效问答 |
 | 满意度回访话术.pdf | 顾客回访/投诉安抚话术 | 话术参考 |
 
-> 启动时自动加载入库；另提供 `POST /api/rag/upload` 支持增量上传新文档
+> 启动时自动加载入库；另提供 `POST /api/rag/upload` 支持增量上传新文档和 CSV/XLSX 表格。表格按工作表逐行读取，每行保留表头和“字段=值”文本并独立建立检索块，避免目标行被整表上下文截断。
 > （basename 白名单 + 20MB + 按文件名幂等，不误删其他文档）。
 
 ## 3. 文本切分策略（rag/loader.py，父子切割）
@@ -91,7 +92,7 @@ def search_operation_knowledge(query: str, top_k: int = 5) -> list[dict]:
 
 ```python
 def ingest(paths: list[str] | None = None) -> int:
-    docs = load(paths)                 # TextLoader / PyPDFLoader / DOCXLoader
+    docs = load(paths)                 # TextLoader / PyPDFLoader / DOCXLoader / CSV / XLSX
     chunks = split_documents_hierarchical(docs)   # 父子切割：父块抽 parent_docs，子块进主库
     client.add_documents(chunks)       # Embedding + 入库（幂等：只删本次涉及 doc_type）
     return len(chunks)

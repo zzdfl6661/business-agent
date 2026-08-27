@@ -31,6 +31,50 @@ _NUM_RE_STRICT = re.compile(r"(?:第\s*(\d{1,2})\s*家|\s*(\d{1,2})\s*号\s*(?:�
 
 _store_cache: list[dict] | None = None
 
+# 用户常省略商场名称中的中间词，例如“上海大悦城”指“上海长风大悦城”。
+# 仅对带有明确商业体后缀的地点短语启用，并且必须唯一命中，避免把
+# “上海门店”之类的泛称错误归到某一家门店。
+_LOCATION_SUFFIXES = (
+    "大悦城", "天街", "万达", "来福士", "印象城", "广场", "世界商城", "太阳宫", "小南门",
+)
+_CHINESE_RE = re.compile(r"[\u4e00-\u9fff]+")
+
+
+def _compact_text(value: str) -> str:
+    """仅保留中文字符，供门店地点简称的确定性匹配使用。"""
+    return "".join(_CHINESE_RE.findall(value or ""))
+
+
+def _is_subsequence(needle: str, haystack: str) -> bool:
+    """needle 的字符是否按顺序出现在 haystack 中（允许省略中间地点词）。"""
+    if not needle or not haystack:
+        return False
+    pos = 0
+    for char in needle:
+        pos = haystack.find(char, pos)
+        if pos < 0:
+            return False
+        pos += 1
+    return True
+
+
+def _location_aliases(question: str) -> set[str]:
+    """从问题中提取“上海大悦城”这类带商业体后缀的地点简称。"""
+    compact_question = _compact_text(question)
+    aliases: set[str] = set()
+    for suffix in _LOCATION_SUFFIXES:
+        start = 0
+        while True:
+            index = compact_question.find(suffix, start)
+            if index < 0:
+                break
+            for prefix_len in range(1, min(4, index) + 1):
+                alias = compact_question[index - prefix_len : index + len(suffix)]
+                if len(alias) >= len(suffix) + 2:
+                    aliases.add(alias)
+            start = index + len(suffix)
+    return aliases
+
 
 def _load_stores() -> list[dict]:
     """加载门店字典 [{store_id, name, search_keyword, city}]（进程级缓存）。"""
@@ -129,4 +173,18 @@ def resolve_store_id(question: str) -> int | None:
             return s["store_id"]
         if s["search_keyword"] and len(s["search_keyword"]) >= 2 and s["search_keyword"] in q:
             return s["store_id"]
+
+    # 3) 地点简称：如“上海大悦城”唯一对应“上海长风大悦城店”。
+    # 多个候选仍交由澄清流程处理，禁止猜测门店。
+    candidates: set[int] = set()
+    for alias in _location_aliases(q):
+        for s in stores:
+            name_and_keyword = _compact_text(" ".join((s.get("name") or "", s.get("search_keyword") or "")))
+            # city 不是门店全名的一部分时，也要把“城市 + 门店名”作为一条候选。
+            # 这能使有多个同商场门店时正确识别歧义，而不是偏向名称里恰好带城市的行。
+            city_and_name = _compact_text(" ".join((s.get("city") or "", s.get("name") or "", s.get("search_keyword") or "")))
+            if _is_subsequence(alias, name_and_keyword) or _is_subsequence(alias, city_and_name):
+                candidates.add(s["store_id"])
+    if len(candidates) == 1:
+        return next(iter(candidates))
     return None

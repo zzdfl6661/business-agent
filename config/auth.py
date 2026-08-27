@@ -47,7 +47,7 @@ class ApiTokenMiddleware:
             if not self._warned:
                 logger.warning(
                     "BIZ_API_TOKEN 未配置——API 鉴权已禁用！生产环境务必设置，"
-                    "否则任何可访问本服务的人都可调用接口（消耗 LLM 额度 / 触发数据采集 / 确认执行预算修改）。"
+                    "否则任何可访问本服务的人都可调用接口（消耗 LLM 额度 / 触发数据采集 / 确认通知草稿）。"
                 )
                 self._warned = True
             await self.app(scope, receive, send)

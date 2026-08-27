@@ -256,6 +256,10 @@ def _clean_env() -> dict:
         "CODEBUDDY_SAFE_DELETE_SANDBOX",
     ):
         env.pop(k, None)
+    # Collector 子进程输出包含中文和状态符号；显式统一为 UTF-8，避免 Windows
+    # 默认 GBK 在打印“✅”等字符时抛 UnicodeEncodeError，并与下方 UTF-8 解码一致。
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
@@ -276,7 +280,8 @@ def _run_module(module: str, args: list[str] | None = None, timeout: int = 600) 
             cmd, cwd=str(PROJECT_DIR), capture_output=True, timeout=timeout,
             env=clean_env, **kwargs,
         )
-        out = proc.stdout.decode("utf-8", errors="replace")[-600:] + proc.stderr.decode("utf-8", errors="replace")[-400:]
+        # 统一下载器会在末尾输出结构化 RESULT_JSON；保留足够长度供调用方解析。
+        out = proc.stdout.decode("utf-8", errors="replace")[-5000:] + proc.stderr.decode("utf-8", errors="replace")[-1000:]
         if proc.returncode != 0:
             # 探针：同 env 跑最简 python 命令，区分「python 子进程启动问题」与「脚本/playwright/Edge 问题」
             probe = subprocess.run(
@@ -317,10 +322,8 @@ async def refresh_market_data(datasets: str = "campaign", port: int = 9222) -> d
     """
     import asyncio as _asyncio
 
-    # 1) 强制重启 Edge 调试实例（每次全新状态）：连续操作后 Edge 会进入"累积假死"
-    #    （CDP /json/version 探活正常但实际页面操作卡死），探活检测不到，
-    #    每次刷新前 kill + 重新启动最稳妥，代价约 30 秒。
-    edge_ok, edge_msg = _restart_edge(port)
+    # 已打开客流/交易/咨询页面时必须复用当前 Edge；只有探活失败才重启。
+    edge_ok, edge_msg = (_ensure_edge(port) if _edge_healthy(port) else _restart_edge(port))
     if not edge_ok:
         return {"success": False, "data": {}, "error": edge_msg}
     # 2) 自动注入登录态（独立子进程 playwright，规避 uvicorn 进程内 driver 累积问题）
@@ -331,33 +334,36 @@ async def refresh_market_data(datasets: str = "campaign", port: int = 9222) -> d
     ds = {d.strip() for d in datasets.lower().split(",")} if datasets != "all" else {"campaign", "traffic", "transaction", "consult"}
     results: dict = {"edge": {"success": True, "detail": edge_msg}, "login": {"success": True, "detail": login_msg}}
 
-    # 1) 智选展位：全自动下载（脚本内自动导航页面，subprocess 隔离执行）→ 入库
-    if "campaign" in ds or "all" in datasets:
-        rc, out = -1, ""
-        for attempt in range(2):  # Edge 状态偶发，重试一次
-            rc, out = await _asyncio.to_thread(_run_module, "scripts.download_zxz_report", [f"--port={port}"], 600)
-            if rc == 0:
-                break
-            logger.warning("智选展位下载第 %s 次失败 rc=%s out=%.150r", attempt + 1, rc, out)
-            await _asyncio.sleep(3)
-        results["campaign_download"] = {"success": rc == 0, "detail": out[-200:]}
+    # 统一下载器：campaign 自动导航；其他模块复用用户已打开页面。
+    requested_text = ",".join(sorted(ds))
+    rc, out = await _asyncio.to_thread(
+        _run_module, "scripts.download_meituan_reports",
+        [f"--port={port}", f"--datasets={requested_text}"], 900,
+    )
+    match = __import__("re").search(r"RESULT_JSON=(\{.*\})", out)
+    download_result = {}
+    if match:
+        try:
+            download_result = __import__("json").loads(match.group(1))
+        except Exception:
+            download_result = {}
+    results["downloads"] = {"success": rc == 0, "datasets": download_result, "detail": out[-300:]}
 
-    # 2) 统一入库（智选 4 维 + 已下载的客流/交易/咨询文件）
-    if any(d in ds for d in ("campaign", "all")) or "all" in datasets:
-        rc, out = await _asyncio.to_thread(_run_module, "scripts.import_market_data", None, 300)
-        results["import"] = {"success": rc == 0, "detail": out[-300:]}
-
-    # 3) 需手动开 tab 的模块（返回指引；Edge 与登录态已就绪，manual 标记供前端显示 ⏳）
-    manual = {"traffic": "客流分析", "transaction": "交易分析", "consult": "在线咨询分析"}
-    for key, name in manual.items():
-        if key in ds:
+    downloaded = [name for name, value in download_result.items() if value.get("success")]
+    if downloaded:
+        rc_import, out_import = await _asyncio.to_thread(
+            _run_module, "scripts.import_market_data", [f"--datasets={','.join(downloaded)}"], 300,
+        )
+        results["import"] = {"success": rc_import == 0, "datasets": downloaded, "detail": out_import[-300:]}
+    for key, value in download_result.items():
+        if value.get("manual"):
             results[key] = {
                 "success": False,
                 "manual": True,
-                "detail": f"{name} 需在已自动启动的 Edge 中手动打开 经营参谋→{name} tab 后重刷（美团后台 SPA 限制，脚本无法自动导航）",
+                "detail": f"请在当前 Edge 中打开对应经营参谋页面后再次点击刷新：{value.get('error')}",
             }
 
     # 成功判定：核心自动化模块（edge/login/campaign_download/import）全部成功即可，
     # manual 模块（需手动开 tab 的指引）不计入失败
-    ok = all(r.get("success", False) for k, r in results.items() if not r.get("manual"))
+    ok = bool(downloaded) and all(r.get("success", False) for k, r in results.items() if not r.get("manual"))
     return {"success": ok, "data": results, "error": None}

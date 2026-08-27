@@ -81,3 +81,29 @@ def test_campaign_empty_and_roi():
     r2 = analysis_business_data.invoke({"sales_data": _sales(), "campaign_data": camp})
     assert r2["data"]["metrics"]["campaign_roi_avg"] == 1.2
     assert any(a["type"] == "roi_low" for a in r2["data"]["anomalies"])
+
+
+def test_market_funnel_and_stale_data_are_in_analysis():
+    traffic = {"success": True, "data": {
+        "freshness": {"period_end": "2026-08-10", "age_days": 16, "stale": True},
+        "stores": [{"exposure_users": 1000, "visit_users": 100, "intention_users": 4, "order_users": 2}],
+    }}
+    transaction = {"success": True, "data": {
+        "freshness": {"period_end": "2026-08-10", "age_days": 16, "stale": True},
+        "stores": [{"order_amount": 1000, "order_coupons": 10, "verify_amount": 700, "refund_amount": 250}],
+    }}
+    consult = {"success": True, "data": {
+        "freshness": {"period_end": "2026-08-10", "age_days": 16, "stale": True},
+        "stores": [{"consult_users": 20, "consult_leads": 3, "reply5_rate": 70}],
+    }}
+    result = analysis_business_data.invoke({
+        "sales_data": _sales(), "traffic_data": traffic,
+        "transaction_data": transaction, "consult_data": consult,
+    })
+    metrics = result["data"]["metrics"]
+    assert metrics["exposure_visit_rate"] == 10.0
+    assert metrics["visit_intention_rate"] == 4.0
+    assert metrics["refund_rate"] == 25.0
+    assert any(a["type"] == "data_stale" for a in result["data"]["anomalies"])
+    factor_types = {f["type"] for f in result["data"]["factors"]}
+    assert {"visit_conversion_low", "slow_consult_reply", "refund_high"} <= factor_types

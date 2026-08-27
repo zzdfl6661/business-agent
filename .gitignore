@@ -16,6 +16,10 @@ data/edge_debug_profile/
 # ---------- 爬取的经营业务报表（敏感经营数据） ----------
 data/scraped/
 
+# ---------- 联系人对照表（含手机号，仅通过受鉴权接口导入数据库） ----------
+*店长信息库*.csv
+*店长信息库*.xlsx
+
 # ---------- 向量库（本地构建，体积大） ----------
 chroma_db/
 
@@ -31,14 +35,17 @@ __pycache__/
 .venv/
 venv/
 env/
+.uv-cache/
 
 # ---------- IDE / 系统 ----------
 .idea/
 .vscode/
+.claude/
 *.iml
 .DS_Store
 Thumbs.db
 
 # ---------- 临时文件 ----------
+tmp/
 tmp_*.py
 *.tmp

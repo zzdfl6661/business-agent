@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     DateTime,
     DECIMAL,
@@ -44,6 +45,9 @@ class Store(TimestampMixin, Base):
     __tablename__ = "stores"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 美团/点评经营参谋使用的外部门店 ID。Agent 与通知流程仍统一使用本表 id，
+    # 查询经营参谋数据时由确定性代码转换，避免两个 ID 空间混用导致串店。
+    platform_store_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     store_code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     store_name: Mapped[str] = mapped_column(String(128), nullable=False)
     region: Mapped[str | None] = mapped_column(String(32), index=True)
@@ -130,6 +134,10 @@ class PromotionReport(TimestampMixin, Base):
     __table_args__ = (Index("ix_promo_dim_name", "dimension", "name"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 当前全局推广报表没有门店列，因此历史记录为 NULL；未来按门店下载后写入。
+    # 单店查询不得把 NULL（全局）数据伪装成该店数据。
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("stores.id"), index=True)
+    store_name: Mapped[str | None] = mapped_column(String(128))
     dimension: Mapped[str] = mapped_column(String(16), nullable=False)   # adv / time
     name: Mapped[str] = mapped_column(String(64), nullable=False)        # 推广名称 或 日期(08-03)
     target: Mapped[str | None] = mapped_column(String(64))               # 人群定向（adv 维度）
@@ -159,13 +167,13 @@ class PromotionReport(TimestampMixin, Base):
 class DataSnapshot(TimestampMixin, Base):
     """
     数据导入快照元信息：记录每个数据集的时间范围（7 天区间 / 对比区间 / 单日粒度）。
-    每次导入前先删除同 dataset 旧快照，保证幂等。
+    每次导入追加一条运行记录；明细表只覆盖同一时间段，保留历史周期。
     """
 
     __tablename__ = "data_snapshots"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    dataset: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    dataset: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     # 本数据集覆盖的时间区间（近 7 天）
     period_start: Mapped[date | None] = mapped_column(Date)
     period_end: Mapped[date | None] = mapped_column(Date)
@@ -328,6 +336,68 @@ class ChatSession(TimestampMixin, Base):
     history: Mapped[str] = mapped_column(Text)          # JSON: [{"role","content"}, ...]
     last_question: Mapped[str | None] = mapped_column(String(500))
     message_count: Mapped[int] = mapped_column(default=0)
+
+
+class AnalysisRun(TimestampMixin, Base):
+    """可复用的结构化经营分析快照，供同会话通知追问读取。"""
+
+    __tablename__ = "analysis_runs"
+    __table_args__ = (
+        Index("ix_analysis_session_created", "session_id", "created_at"),
+        Index("ix_analysis_store_created", "store_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("stores.id"), index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    period: Mapped[str | None] = mapped_column(String(128))
+    payload: Mapped[str] = mapped_column(Text, nullable=False)  # JSON：指标、归因、报告、来源
+
+
+class StoreContact(TimestampMixin, Base):
+    """门店店长的精确通知目标；手机号加密存储，绝不进入 RAG。"""
+
+    __tablename__ = "store_contacts"
+    __table_args__ = (Index("ix_contact_store_active", "store_id", "active"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("stores.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    store_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    manager_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    manager_mobile_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    manager_mobile_last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    dingtalk_user_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    source_file: Mapped[str | None] = mapped_column(String(255))
+    source_row: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class NotificationPlan(TimestampMixin, Base):
+    """店长沟通草稿与授权状态机；第一阶段只允许 simulated。"""
+
+    __tablename__ = "notification_plans"
+    __table_args__ = (
+        Index("ix_notification_session_status", "session_id", "status"),
+        Index("ix_notification_store_status", "store_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    analysis_run_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("stores.id"), index=True)
+    intended_recipient: Mapped[str] = mapped_column(String(128), nullable=False)
+    effective_recipient: Mapped[str] = mapped_column(String(128), nullable=False)
+    message_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False, default="pending_approval")
+    idempotency_key: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
+    result_detail: Mapped[str | None] = mapped_column(Text)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class AuditLog(TimestampMixin, Base):

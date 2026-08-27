@@ -115,7 +115,9 @@
   #input:focus { border-color: var(--accent); }
   #send { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 0 26px; font-size: 14px; cursor: pointer; }
   #send:disabled { opacity: .5; cursor: not-allowed; }
-  .typing { color: var(--sub); font-size: 13px; }
+  .typing { color: var(--sub); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .typing::before { content: ''; width: 11px; height: 11px; border: 2px solid #c9d6fb; border-top-color: var(--accent); border-radius: 50%; animation: progress-spin .8s linear infinite; flex: 0 0 auto; }
+  @keyframes progress-spin { to { transform: rotate(360deg); } }
   .suggest { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; align-items: center; }
   .suggest button { border: 1px solid var(--border); background: var(--panel); border-radius: 16px; padding: 5px 14px; font-size: 12.5px; color: var(--accent); cursor: pointer; }
   .suggest button:hover { border-color: var(--accent); }
@@ -127,7 +129,7 @@
   /* ---------- LLM 通道下拉（#15 运行时切换） ---------- */
   .llm-select { border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-size: 12px; outline: none; background: #fff; color: var(--text); }
   .llm-select:focus { border-color: var(--accent); }
-  /* ---------- 待确认执行计划卡片（自动化执行授权） ---------- */
+  /* ---------- 店长通知草稿（人工确认后发往配置的测试接收人） ---------- */
   .plans { margin: 10px 0; border: 1px solid #ffe1a8; background: #fffaf0; border-radius: 12px; padding: 10px 14px; }
   .plans-title { font-size: 13.5px; font-weight: 700; color: #b45309; margin-bottom: 8px; }
   .plan-card { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 8px 12px; margin: 6px 0; font-size: 13px; }
@@ -135,6 +137,7 @@
   .plan-reason { color: var(--sub); font-size: 12.5px; margin: 2px 0; }
   .plan-meta { color: var(--sub); font-size: 11.5px; margin: 3px 0 6px; }
   .plan-btns { display: flex; gap: 8px; }
+  .notification-text { width: 100%; min-height: 210px; margin: 8px 0; box-sizing: border-box; resize: vertical; border: 1px solid var(--border); border-radius: 7px; padding: 9px; color: var(--text); background: #fcfdff; font: 12.5px/1.65 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
   .plan-result { font-size: 12.5px; margin-top: 6px; font-weight: 600; }
   .plan-result.ok { color: #00b578; }
   .plan-result.err { color: #e5484d; }
@@ -266,7 +269,7 @@
 
     <div class="nav-footer">
       <p><span class="status-dot"></span>工作台已就绪</p>
-      <p>数据分析 · 知识问答 · 执行确认</p>
+      <p>数据分析 · 知识问答 · 通知确认</p>
     </div>
   </aside>
 
@@ -328,6 +331,10 @@
             <button onclick="ask('门店晋升需要什么条件，怎么报名')">晋升条件与报名</button>
             <button onclick="ask('薪资绩效是怎么算的')">薪资绩效核算</button>
             <button onclick="ask('顾客不记得场次怎么安抚')">咨询话术参考</button>
+          </div>
+          <div class="suggest suggest-group">
+            <span class="suggest-tag">💬 店长通知</span>
+            <button onclick="ask('分析最近7天1号门店营业额下降原因，并通知店长')">分析并生成通知草稿</button>
           </div>
         </div>
       </div>
@@ -793,6 +800,15 @@ async function send() {
   const repEl = botDiv.querySelector('#botReport');
   const metaEl = botDiv.querySelector('#botMeta');
   let reportText = '';
+  let progressText = '正在识别问题…';
+  const progressStartedAt = Date.now();
+  const renderProgress = () => {
+    const elapsed = Math.max(1, Math.floor((Date.now() - progressStartedAt) / 1000));
+    progEl.textContent = `${progressText}（已用 ${elapsed} 秒）`;
+    chatEl.scrollTop = chatEl.scrollHeight;
+  };
+  renderProgress();
+  const progressTimer = setInterval(renderProgress, 1000);
 
   try {
     const resp = await apiFetch('/api/chat/stream', {
@@ -818,17 +834,20 @@ async function send() {
           else if (line.startsWith('data: ')) data += line.slice(6);
         }
         if (event === 'progress') {
-          progEl.textContent = data;
+          progressText = data || progressText;
+          renderProgress();
         } else if (event === 'token') {
-          if (repEl.style.display === 'none') { repEl.style.display = ''; progEl.style.display = 'none'; }
+          if (repEl.style.display === 'none') { repEl.style.display = ''; progEl.style.display = 'none'; clearInterval(progressTimer); }
           reportText = mergeStreamText(reportText, data);
           repEl.textContent = reportText;   // 打字机纯文本
           chatEl.scrollTop = chatEl.scrollHeight;
         } else if (event === 'error') {
+          clearInterval(progressTimer);
           progEl.className = 'bubble err'; progEl.textContent = '出错：' + data;
         } else if (event === 'done') {
           const m = JSON.parse(data);
           const u = m.usage;
+          clearInterval(progressTimer);
           progEl.style.display = 'none';
           // 修复：data 结构化链路无 token 事件，报告容器从未被显示（导出能看到、对话里却空白）
           if (repEl.style.display === 'none') repEl.style.display = '';
@@ -842,7 +861,7 @@ async function send() {
           } else {
             repEl.innerHTML = renderKpis(m, m.user_question || q) + renderMarkdown(reportText);
           }
-          if (m.pending_plans && m.pending_plans.length) renderPlans(repEl, m.pending_plans);   // 待确认执行计划（授权）
+          if (m.pending_notifications && m.pending_notifications.length) renderNotifications(repEl, m.pending_notifications);
           let cost = '⚡ token 用量不可见';
           if (u) {
             const est = u.estimated ? '约 ' : '';
@@ -860,11 +879,13 @@ async function send() {
     // 流结束兜底：若从未收到 done（异常断流），仍显示已累积内容
     if (repEl.style.display === 'none') { progEl.textContent = '连接中断，请重试'; }
   } catch (e) {
+    clearInterval(progressTimer);
     progEl.className = 'bubble err';
     progEl.textContent = e.message.includes('401')
       ? '需要 API Token（401）：请在右上角填写后重试'
       : '网络错误：' + e.message;
   }
+  clearInterval(progressTimer);
   busy = false; sendBtn.disabled = false;
   loadSessions();   // 对话完成后刷新历史列表（标题/时间/消息数/高亮）
   inputEl.focus();
@@ -872,22 +893,22 @@ async function send() {
 
 function ask(q) { inputEl.value = q; send(); }
 
-/* ---------------- 待确认执行计划（自动化执行授权：dry-run → 用户确认 → 执行） ---------------- */
-function renderPlans(container, plans) {
+/* ---------------- 店长通知授权：草稿 → 编辑 → 人工确认发送 ---------------- */
+function renderNotifications(container, plans) {
   const box = document.createElement('div');
   box.className = 'plans';
-  box.innerHTML = '<div class="plans-title">⚡ 待确认的执行计划（dry-run，未修改任何数据）</div>';
+  box.innerHTML = '<div class="plans-title">✉ 待确认通知（确认后按当前钉钉发送配置执行）</div>';
   for (const p of plans) {
     const card = document.createElement('div');
     card.className = 'plan-card';
-    const reasonHtml = p.reason ? `<div class="plan-reason">原因：${escapeHtml(p.reason)}</div>` : '';
     card.innerHTML = `
-      <div class="plan-line">💰 调整推广预算：campaign <b>${escapeHtml(p.campaign_id)}</b> 由 <b>${escapeHtml(p.old_budget)}</b> → <b>${escapeHtml(p.new_budget)}</b></div>
-      ${reasonHtml}
-      <div class="plan-meta">计划号：${escapeHtml(p.plan_id)} · 10 分钟内有效 · 一次性</div>
+      <div class="plan-line">原定收件人：<b>${escapeHtml(p.intended_recipient)}</b> · 本次实际接收人（测试）：<b>${escapeHtml(p.effective_recipient)}</b></div>
+      <textarea class="notification-text" maxlength="1200">${escapeHtml(p.message_text || '')}</textarea>
+      <div class="plan-meta">计划号：${escapeHtml(p.plan_id)} · 需人工确认后才会发送</div>
       <div class="plan-btns">
-        <button class="wf-btn primary" onclick="confirmPlan('${p.plan_id}', this)">确认执行</button>
-        <button class="wf-btn" onclick="this.closest('.plan-card').style.display='none'">忽略</button>
+        <button class="wf-btn" onclick="saveNotification('${p.plan_id}', this)">保存修改</button>
+        <button class="wf-btn primary" onclick="confirmNotification('${p.plan_id}', this)">确认发送</button>
+        <button class="wf-btn" onclick="cancelNotification('${p.plan_id}', this)">忽略</button>
       </div>
       <div class="plan-result"></div>`;
     box.appendChild(card);
@@ -895,15 +916,32 @@ function renderPlans(container, plans) {
   container.appendChild(box);
 }
 
-async function confirmPlan(planId, btn) {
+async function saveNotification(planId, btn) {
+  const card = btn.closest('.plan-card');
+  const info = card.querySelector('.plan-result');
+  const messageText = card.querySelector('.notification-text').value;
+  btn.disabled = true;
+  try {
+    const resp = await apiFetch('/api/notifications/' + encodeURIComponent(planId), {
+      method: 'PATCH', headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ message_text: messageText })
+    });
+    const d = await resp.json();
+    if (!d.success) throw new Error(d.error || '保存失败');
+    info.textContent = '✅ 草稿已保存'; info.className = 'plan-result ok';
+  } catch (e) {
+    info.textContent = '❌ ' + e.message; info.className = 'plan-result err';
+  } finally { btn.disabled = false; }
+}
+
+async function confirmNotification(planId, btn) {
   const card = btn.closest('.plan-card');
   const info = card.querySelector('.plan-result');
   btn.disabled = true; btn.textContent = '确认中…';
   try {
-    const resp = await apiFetch('/api/execute/confirm', {
+    const resp = await apiFetch('/api/notifications/' + encodeURIComponent(planId) + '/confirm', {
       method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ plan_id: planId })
+      headers: authHeaders({ 'Content-Type': 'application/json' })
     });
     let d;
     try {
@@ -913,12 +951,14 @@ async function confirmPlan(planId, btn) {
       d = { success: false, error: 'HTTP ' + resp.status + ' ' + txt.slice(0, 120) };
     }
     if (d.success) {
-      info.textContent = `✅ 已执行：campaign ${d.data.campaign_id} 预算 ${d.data.old_budget} → ${d.data.new_budget}`;
+      const plan = d.plan || {};
+      info.textContent = `✅ 已${plan.status === 'simulated' ? '模拟发送' : '发送'}：${plan.effective_recipient || ''}`;
       info.className = 'plan-result ok';
       btn.style.display = 'none';
-      card.querySelectorAll('.plan-btns .wf-btn:not(.primary)').forEach(b => b.style.display = 'none');
+      card.querySelectorAll('.plan-btns .wf-btn').forEach(b => b.style.display = 'none');
+      card.querySelector('.notification-text').disabled = true;
     } else {
-      info.textContent = '❌ ' + (d.error || '执行失败');
+      info.textContent = '❌ ' + (d.error || d.detail || '发送失败');
       info.className = 'plan-result err';
       btn.disabled = false; btn.textContent = '重试确认';
     }
@@ -926,6 +966,22 @@ async function confirmPlan(planId, btn) {
     info.textContent = '❌ 请求失败：' + e.message;
     info.className = 'plan-result err';
     btn.disabled = false; btn.textContent = '重试确认';
+  }
+}
+
+async function cancelNotification(planId, btn) {
+  const card = btn.closest('.plan-card');
+  const info = card.querySelector('.plan-result');
+  try {
+    const resp = await apiFetch('/api/notifications/' + encodeURIComponent(planId) + '/cancel', {
+      method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' })
+    });
+    const d = await resp.json();
+    if (!d.success) throw new Error(d.error || '取消失败');
+    info.textContent = '已忽略该通知草稿'; info.className = 'plan-result ok';
+    card.querySelectorAll('.plan-btns .wf-btn').forEach(b => b.style.display = 'none');
+  } catch (e) {
+    info.textContent = '❌ ' + e.message; info.className = 'plan-result err';
   }
 }
 

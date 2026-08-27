@@ -41,12 +41,12 @@
 
       <div class="grid two">
         <section class="card card-pad">
-          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start"><div><h2>上传知识文档</h2><p class="card-note" id="uploadPolicy">支持 MD、TXT、PDF、DOCX，单文件最大 20 MB。</p></div><span class="tag"><i></i>持久化存储</span></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start"><div><h2>上传知识文档或表格</h2><p class="card-note" id="uploadPolicy">支持 MD、TXT、PDF、DOCX、CSV、XLSX，单文件最大 20 MB。</p></div><span class="tag"><i></i>持久化存储</span></div>
           <div class="upload-zone" id="dropZone">
             <div class="upload-icon">↑</div>
             <h3>拖放文件到这里，或选择本地文件</h3>
-            <p>建议上传制度、SOP、产品说明、业务规则等结构清晰的资料。</p>
-            <input id="fileInput" type="file" accept=".md,.txt,.pdf,.docx" hidden>
+            <p>支持制度、SOP、产品说明、业务规则及带表头的 CSV、XLSX 表格。</p>
+            <input id="fileInput" type="file" hidden>
             <button class="secondary-btn" id="chooseBtn" type="button">选择文件</button>
             <div class="file-name" id="fileName">尚未选择文件</div>
           </div>
@@ -111,7 +111,11 @@ async function loadDocuments() {
     if (!response.ok || !data.success) throw new Error(data.error || '加载失败');
     document.getElementById('docTotal').textContent = data.total_documents;
     const policy = data.upload_policy || {};
-    document.getElementById('uploadPolicy').textContent = '支持 ' + (policy.allowed_extensions || []).map(x => x.toUpperCase()).join('、') + '，单文件最大 ' + formatBytes(policy.max_bytes || 0) + '。';
+    const allowedExtensions = (policy.allowed_extensions || []).map(x => String(x).startsWith('.') ? String(x) : '.' + String(x));
+    // 不用浏览器 accept 过滤文件：Windows 文件选择框可能按 MIME/扩展名隐藏合法表格。
+    // 真正的格式白名单仍由后端 upload_and_ingest 强制校验。
+    fileInput.removeAttribute('accept');
+    document.getElementById('uploadPolicy').textContent = '支持 ' + allowedExtensions.map(x => x.slice(1).toUpperCase()).join('、') + '，单文件最大 ' + formatBytes(policy.max_bytes || 0) + '。';
     const c = data.chunking || {};
     document.getElementById('chunkingText').textContent = '父块 ' + (c.parent_size || 1200) + ' 字 / 重叠 ' + (c.parent_overlap || 150) + '，子块 ' + (c.child_size || 350) + ' 字 / 重叠 ' + (c.child_overlap || 50) + '。';
     const docs = data.documents || [];
