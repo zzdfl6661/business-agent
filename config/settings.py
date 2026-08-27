@@ -68,9 +68,39 @@ class Settings(BaseSettings):
     # 留空 = 关闭鉴权（开发模式，启动时输出警告）；生产/联调环境务必设置
     api_token: str = ""
 
+    # Windows 宿主机采集器地址。配置后主服务只转发刷新请求，Edge/登录态不进入 Docker。
+    collector_url: str = ""
+
     # ---------- 阶段二：自动化执行 ----------
     playwright_headless: bool = True
     ops_platform_url: str = "http://localhost:3000/ops"
+
+    # ---------- 店长通知 / 钉钉 MCP ----------
+    # 联系人手机号使用 Fernet 加密；未配置时拒绝导入，避免明文落库。
+    contact_encryption_key: str = ""
+    # 默认双重关闭：dry_run 不会建立 MCP 连接，enabled=false 时确认仅记录 simulated。
+    dingtalk_enabled: bool = False
+    dingtalk_mode: str = "dry_run"  # dry_run / live
+    dingtalk_dry_run_recipient: str = "朱兴福"
+    # 个人账号通道：Docker 主服务转发到 Windows 宿主机已登录的 dws CLI。
+    # official_mcp 仅保留作企业机器人/网关兼容，不是个人账号默认方案。
+    dingtalk_dispatcher: str = "dws_host"  # dws_host / official_mcp
+    dingtalk_dws_command: str = "dws"
+    # live 当前只允许向这一名测试接收人单聊发送；两个 ID 任一缺失时 fail-closed。
+    dingtalk_live_recipient_name: str = "朱兴福"
+    dingtalk_live_recipient_user_id: str = ""
+    dingtalk_live_recipient_open_id: str = ""
+    # 官方 dingtalk-mcp 以本地 stdio 方式运行；保留 streamable_http 兼容已部署网关。
+    dingtalk_mcp_transport: str = "stdio"  # stdio / streamable_http
+    dingtalk_client_id: str = ""
+    dingtalk_client_secret: str = ""
+    dingtalk_robot_code: str = ""
+    dingtalk_mcp_url: str = ""
+    dingtalk_mcp_auth_token: str = ""
+    # 官方 dingtalk-mcp 1.1.x 的工具名；网关部署可通过环境变量覆写。
+    dingtalk_mcp_search_user_tool: str = "getUserIdByMobile"
+    dingtalk_mcp_send_text_tool: str = "batchSendMessageToUsersByRobot"
+    intent_llm_fallback: bool = True
 
     # ---------- 派生属性 ----------
     @property

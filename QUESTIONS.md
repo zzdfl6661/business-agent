@@ -2,6 +2,7 @@
 
 > 本文档记录项目开发过程中遇到的问题、修复方案、功能优化。
 > 每次修改或优化都追加新条目，按时间倒序排列（最新在上）。
+> 历史条目保留当时版本的决策；如与当前实现冲突，以 README 和最新条目为准。
 
 ---
 
@@ -14,6 +15,34 @@
 ---
 
 ## 已修复问题
+
+### 2026-08-27 | DWS 多行通知正文被截断
+
+- **现象/背景**：经营分析和通知草稿均正常，但钉钉实际收到的消息只有 `【经营情况沟通】` 标题，正文段落没有显示；DWS 返回发送成功，容易误判为前端或 LLM 生成问题。
+- **根因/修改**：项目通过 Windows 的 `dws.cmd` 包装器调用消息发送命令。多行正文经过 `.cmd → Node → dws.exe` 参数转发时被截断；DWS 原生 `dws.exe` 的 dry-run 可确认完整正文仍在消息 JSON 中。Collector 现强制拒绝 `.cmd/.bat`，发送参数使用官方当前命令的 `--content` 与 `--idempotency-key`，并固定使用已确认收件人的 `openDingTalkId`。
+- **影响范围**：仅钉钉个人单聊外发；分析结果、通知草稿、dry-run 和旧预算接口不受影响。旧的部分消息不会自动重发，避免违反幂等规则。
+- **验证/决策**：原生 `dws.exe --dry-run` 已验证多行内容完整进入 `send_personal_message` 参数；新增 `tests/test_collector_dingtalk.py`，通知/流式相关测试共 16 条通过；重启 `scripts/start_collector.ps1` 后生效。后续测试需新建通知计划并人工确认。
+
+### 2026-08-27 | 个人 DWS live 单聊接入与宿主机 Collector 固化
+
+- **现象/背景**：项目已有通知草稿和 dry-run，但需要在个人钉钉账号已登录的前提下，人工确认后实际发送给朱兴福；Docker 容器不能直接复用 Windows 登录态。
+- **根因/修改**：新增 Windows 宿主机 `collector_main.py` 作为唯一 DWS 执行边界。Docker 主服务只发送已校验的通知文本、固定 userId 和幂等键；Collector 再用配置锁定的 `openDingTalkId` 调用 DWS。未启用、收件人不匹配、缺少 ID、Collector 不可达或 DWS 不可用时全部 fail-closed。
+- **影响范围**：通知确认接口和运行配置；不修改推广预算，不让 LLM 选择收件人，不改变默认 `disabled + dry_run` 行为。官方 MCP Python SDK 适配仍作为可选 dispatcher 保留。
+- **验证/决策**：`dws auth status` 已确认本机登录态；通讯录搜索得到朱兴福唯一 userId/openDingTalkId；第一次真实投递返回成功但暴露出多行参数问题，已由上一条记录修复。配置路径和运行步骤同步写入 README。
+
+### 2026-08-27 | 通知文档与运行边界同步到最新实现
+
+- **现象/背景**：README 仍描述“仅 dry-run、不建立真实钉钉连接”，接口清单也没有完整说明 AnalysisRun、通知审批、Collector 和个人 DWS live；QUESTION 历史记录还保留预算执行已生效的旧表述。
+- **根因/修改**：按当前代码重新整理 README：明确三类能力、可组合 Agent 图、联系人直接导库方式、dry-run/live 两种路径、固定收件人约束、DWS 原生可执行文件要求、通知 API 和排障方式；在本文件增加当前状态说明，历史条目继续保留但不作为现状依据。
+- **影响范围**：仅项目说明和交接记录，不改变运行逻辑。
+- **验证/决策**：README 中的命令、端点和文件名已与当前仓库实现逐项对照；本次文档更新随代码修复一起提交。
+
+### 2026-08-20 | 知识库支持 CSV/XLSX 表格上传
+
+- **现象/背景**：知识库上传页和 `/api/rag/upload` 仅支持 Markdown、TXT、PDF、DOCX，店长信息库、主题话术库等表格无法上传入库。
+- **根因/修改**（`rag/loader.py`、`api/chat.py`、`static/knowledge.html`、`requirements.txt`）：新增 CSV/XLSX 白名单；CSV 兼容 UTF-8/GB18030 等常见编码，XLSX 按工作表逐行读取并保留表头、行号和“字段=值”关系，每行独立建立检索块；报告上下文优先保留命中的表格行，避免整表父块截断目标记录；前端文件选择器和知识库清单同步支持两种格式；新增 `openpyxl` 运行依赖。
+- **影响范围**：知识库上传、启动时自动扫描的 `rag/data` 文件清单；原有文档格式和同名幂等覆盖逻辑保持不变。
+- **验证/决策**：新增 `tests/test_table_loader.py`；Python 语法检查和 CSV/XLSX 解析 smoke test 通过。当前默认 Anaconda 环境缺少既有 `langchain_core`，pytest 收集阶段无法执行，待按项目依赖环境运行完整测试；未上传用户提供的实际文件。
 
 ### 2026-08-20 | 销量排名数据路由与 OpenAI-compatible 流式重复修复
 

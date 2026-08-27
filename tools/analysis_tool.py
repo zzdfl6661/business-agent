@@ -24,9 +24,12 @@ def _pct(cur: float, prev: float) -> float | None:
 def analysis_business_data(
     sales_data: dict | None = None,
     campaign_data: dict | None = None,
+    traffic_data: dict | None = None,
+    transaction_data: dict | None = None,
+    consult_data: dict | None = None,
     dimension: str = "day",
 ) -> dict:
-    """对销售/推广数据做指标计算与异常归因（Pandas 确定性计算）。
+    """对销售、推广、客流、交易和咨询数据做确定性指标计算与归因。
 
     参数：
         sales_data     get_sales_data 的返回 data 部分；
@@ -78,6 +81,32 @@ def analysis_business_data(
     rois = [c["roi"] for c in campaigns if c.get("roi") is not None]
     avg_roi = round(sum(rois) / len(rois), 2) if rois else None
 
+    def _market_payload(value: dict | None) -> dict:
+        return (value or {}).get("data", {}) if isinstance(value, dict) and "data" in value else (value or {})
+
+    def _selected_store(payload: dict) -> dict:
+        stores = payload.get("stores", []) or []
+        return stores[0] if len(stores) == 1 else (payload.get("total", {}) or {})
+
+    traffic_payload = _market_payload(traffic_data)
+    transaction_payload = _market_payload(transaction_data)
+    consult_payload = _market_payload(consult_data)
+    traffic = _selected_store(traffic_payload)
+    transaction = _selected_store(transaction_payload)
+    consult = _selected_store(consult_payload)
+
+    exposure_users = int(traffic.get("exposure_users", 0) or 0)
+    visit_users = int(traffic.get("visit_users", 0) or 0)
+    intention_users = int(traffic.get("intention_users", 0) or 0)
+    traffic_order_users = int(traffic.get("order_users", 0) or 0)
+    online_order_amount = float(transaction.get("order_amount", 0) or 0)
+    online_order_coupons = int(transaction.get("order_coupons", 0) or 0)
+    verify_amount = float(transaction.get("verify_amount", 0) or 0)
+    refund_amount = float(transaction.get("refund_amount", 0) or 0)
+    consult_users = int(consult.get("consult_users", 0) or 0)
+    consult_leads = int(consult.get("consult_leads", 0) or 0)
+    reply5_rate = float(consult.get("reply5_rate", 0) or 0) if consult else None
+
     metrics = {
         "gmv": round(gmv, 2),
         "order_count": orders,
@@ -88,6 +117,21 @@ def analysis_business_data(
         "campaign_conversion_rate": campaign_conversion_rate,
         "campaign_roi_avg": avg_roi,
         "campaign_total_spent": round(total_spent, 2),
+        "exposure_users": exposure_users,
+        "visit_users": visit_users,
+        "exposure_visit_rate": round(visit_users / exposure_users * 100, 2) if exposure_users else None,
+        "intention_users": intention_users,
+        "visit_intention_rate": round(intention_users / visit_users * 100, 2) if visit_users else None,
+        "traffic_order_users": traffic_order_users,
+        "online_order_amount": round(online_order_amount, 2),
+        "online_order_coupons": online_order_coupons,
+        "verify_amount": round(verify_amount, 2),
+        "refund_amount": round(refund_amount, 2),
+        "refund_rate": round(refund_amount / online_order_amount * 100, 2) if online_order_amount else None,
+        "consult_users": consult_users,
+        "consult_leads": consult_leads,
+        "consult_lead_rate": round(consult_leads / consult_users * 100, 2) if consult_users else None,
+        "reply5_rate": reply5_rate,
         "trend": trend,
     }
 
@@ -148,6 +192,25 @@ def analysis_business_data(
             "message": f"推广点击转化率 {campaign_conversion_rate}% 偏低",
             "evidence": "见 campaigns 明细",
         })
+    freshness = {
+        name: payload.get("freshness", {})
+        for name, payload in (
+            ("traffic", traffic_payload),
+            ("transaction", transaction_payload),
+            ("consult", consult_payload),
+        ) if payload
+    }
+    stale_sets = [name for name, info in freshness.items() if info.get("stale")]
+    if stale_sets:
+        anomalies.append({
+            "level": "high",
+            "type": "data_stale",
+            "message": f"{','.join(stale_sets)} 数据已超过新鲜度阈值",
+            "evidence": "; ".join(
+                f"{name}: 截止 {info.get('period_end')}，距今 {info.get('age_days')} 天"
+                for name, info in freshness.items() if info.get("stale")
+            ),
+        })
 
     # ---------------- 归因因子 ----------------
     factors: list[dict[str, str]] = []
@@ -184,7 +247,28 @@ def analysis_business_data(
             "type": "campaign_budget",
             "impact": f"推广计划「{c0.get('name')}」{ratio_text}{roi_text} 低于健康线",
             "evidence": f"spent={c0.get('spent')} conversions={c0.get('conversions')}",
-            "suggestion": "生成预算调整执行计划（update_campaign_budget 为 dry-run），经用户确认后执行",
+            "suggestion": "核查低效投放的渠道、素材与门店承接情况；必要时向店长同步现场转化与客群反馈，再评估后续策略",
+        })
+    if visit_users and intention_users / visit_users < 0.05:
+        factors.append({
+            "type": "visit_conversion_low",
+            "impact": f"访问到意向转化率仅 {intention_users / visit_users * 100:.2f}%",
+            "evidence": f"访问 {visit_users} 人，意向 {intention_users} 人",
+            "suggestion": "检查门店页面套餐、价格信息、评价展示与咨询入口是否清晰",
+        })
+    if reply5_rate is not None and consult_users and reply5_rate < 80:
+        factors.append({
+            "type": "slow_consult_reply",
+            "impact": f"5分钟内回复率为 {reply5_rate:.2f}%",
+            "evidence": f"咨询 {consult_users} 人，留咨 {consult_leads} 人",
+            "suggestion": "按咨询高峰时段安排值守并统一首轮回复话术",
+        })
+    if online_order_amount and refund_amount / online_order_amount > 0.2:
+        factors.append({
+            "type": "refund_high",
+            "impact": f"退款金额占线上下单金额 {refund_amount / online_order_amount * 100:.2f}%",
+            "evidence": f"退款 {refund_amount:.2f} 元 / 下单 {online_order_amount:.2f} 元",
+            "suggestion": "核查高退款套餐、预约承接和不可用日期说明",
         })
     if not factors:
         factors.append({
@@ -200,5 +284,6 @@ def analysis_business_data(
         "anomalies": anomalies,
         "factors": factors,
         "top_products": top_products,
+        "data_freshness": freshness,
     }
     return {"success": True, "data": result, "error": None}

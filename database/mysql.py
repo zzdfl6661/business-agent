@@ -8,8 +8,9 @@ MySQL 连接层
 from __future__ import annotations
 
 import logging
+import re
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from config.settings import settings
@@ -77,7 +78,45 @@ def init_db() -> None:
     create_db_if_not_exists()
     get_engine().connect()  # 提前暴露连接问题
     Base.metadata.create_all(get_engine())
+    _apply_lightweight_migrations()
     logger.info("数据库初始化完成: %s@%s:%s/%s", settings.db_user, settings.db_host, settings.db_port, settings.db_name)
+
+
+def _safe_identifier(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_]+", value):
+        raise ValueError(f"非法 SQL 标识符: {value}")
+    return value
+
+
+def _apply_lightweight_migrations() -> None:
+    """为已有本地 MySQL 数据库补充小型兼容迁移。
+
+    项目没有引入 Alembic；这里只处理本次新增列和历史快照唯一索引，且全部先
+    通过 inspector 校验现状，重复启动不会重复执行。
+    """
+    engine = get_engine()
+    if engine.dialect.name != "mysql":
+        return
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        store_cols = {c["name"] for c in inspector.get_columns("stores")}
+        if "platform_store_id" not in store_cols:
+            conn.execute(text("ALTER TABLE stores ADD COLUMN platform_store_id BIGINT NULL"))
+            conn.execute(text("CREATE INDEX ix_stores_platform_store_id ON stores (platform_store_id)"))
+
+        promo_cols = {c["name"] for c in inspector.get_columns("promotion_reports")}
+        if "store_id" not in promo_cols:
+            conn.execute(text("ALTER TABLE promotion_reports ADD COLUMN store_id BIGINT NULL"))
+            conn.execute(text("CREATE INDEX ix_promotion_reports_store_id ON promotion_reports (store_id)"))
+        if "store_name" not in promo_cols:
+            conn.execute(text("ALTER TABLE promotion_reports ADD COLUMN store_name VARCHAR(128) NULL"))
+
+        for idx in inspector.get_indexes("data_snapshots"):
+            cols = idx.get("column_names") or []
+            if idx.get("unique") and cols == ["dataset"]:
+                name = _safe_identifier(idx["name"])
+                conn.execute(text(f"ALTER TABLE data_snapshots DROP INDEX `{name}`"))
+                break
 
 
 def get_session():

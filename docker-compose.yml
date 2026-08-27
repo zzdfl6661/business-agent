@@ -9,6 +9,9 @@ services:
       MYSQL_ROOT_PASSWORD: ${BIZ_DB_PASSWORD:?BIZ_DB_PASSWORD must be set}
     volumes:
       - mysql_data:/var/lib/mysql
+    ports:
+      # 仅供 Windows 宿主机 Collector 写入同一套业务数据库，不对局域网暴露。
+      - "127.0.0.1:${BIZ_COLLECTOR_DB_PORT:-3307}:3306"
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
       interval: 5s
@@ -28,6 +31,9 @@ services:
       BIZ_DB_PORT: 3306
       BIZ_CHROMA_DIR: /app/chroma_db
       BIZ_STORES_JSON: /app/data/stores.json
+      BIZ_COLLECTOR_URL: http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       mysql:
         condition: service_healthy
@@ -38,6 +44,8 @@ services:
       - ./data/stores.json:/app/data/stores.json:ro
       - fastembed_cache:/root/.cache/fastembed
       - hf_cache:/root/.cache/huggingface
+      # Chroma 默认 embedding 模型（约 79MB）首次下载后持久化，避免每次重建 app 都阻塞启动。
+      - chroma_onnx_cache:/root/.cache/chroma
     expose:
       - "8000"
     healthcheck:
@@ -66,6 +74,7 @@ volumes:
   app_logs:
   fastembed_cache:
   hf_cache:
+  chroma_onnx_cache:
 
 networks:
   backend:

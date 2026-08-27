@@ -2,7 +2,7 @@
 对话与知识库 API
 ================
 - POST /api/chat       ：自然语言提问 → 经营诊断报告 + 执行轨迹(trace)
-- POST /api/rag/upload ：上传知识文档（md/txt/pdf）→ 解析切分入库
+- POST /api/rag/upload ：上传知识文档或表格（md/txt/pdf/docx/csv/xlsx）→ 解析切分入库
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -24,6 +24,25 @@ from rag import loader
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
+
+_NODE_PROGRESS = {
+    "supervisor": "正在识别问题和目标门店…",
+    "data_agent": "正在查询营业、流量和交易数据…",
+    "kb_agent": "正在检索知识库…",
+    "report": "正在生成经营结论…",
+    "persist_analysis": "正在保存分析快照…",
+    "notification_agent": "正在生成店长沟通草稿…",
+    "load_last_analysis": "正在读取刚才的分析…",
+    "clarification": "正在准备澄清提示…",
+}
+
+_TOOL_PROGRESS = {
+    "get_sales_data": "正在读取销售数据…",
+    "get_traffic_data": "正在读取客流数据…",
+    "get_transaction_data": "正在读取交易数据…",
+    "get_consult_data": "正在读取咨询数据…",
+    "search_operation_knowledge": "正在检索运营知识…",
+}
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -52,11 +71,17 @@ class ChatResponse(BaseModel):
     trace: list[dict] = Field(default_factory=list, description="各节点执行轨迹")
     usage: dict = Field(default_factory=dict, description="token 用量统计")
     duration_ms: int = Field(0, description="本次耗时(毫秒)")
-    pending_plans: list[dict] = Field(default_factory=list, description="待用户确认的执行计划（dry-run，需调用 /api/execute/confirm 执行）")
+    pending_plans: list[dict] = Field(default_factory=list, description="已下线的旧字段，始终为空")
+    analysis_run_id: str | None = Field(None, description="可复用的结构化经营分析快照 ID")
+    pending_notifications: list[dict] = Field(default_factory=list, description="待审批的店长通知草稿")
 
 
 class ExecuteConfirmRequest(BaseModel):
-    plan_id: str = Field(..., min_length=1, max_length=64, description="执行计划号（update_campaign_budget 生成的 plan_id）")
+    plan_id: str = Field(..., min_length=1, max_length=64, description="已下线的旧执行计划号（仅为 410 兼容接口保留）")
+
+
+class NotificationEditRequest(BaseModel):
+    message_text: str = Field(..., min_length=1, max_length=1200)
 
 
 def _sum_usage(result: dict) -> dict:
@@ -229,7 +254,7 @@ def _build_trace(result: dict) -> list[dict]:
         if summary.get("gmv") is not None:
             tools_detail = (
                 f"数据查询：GMV={summary.get('gmv')}，环比={summary.get('gmv_change_pct')}%"
-                f"（数据来源：MySQL）"
+                f"（数据来源：{summary.get('data_source') or 'MySQL'}）"
             )
         elif tools_used:
             tools_detail = f"工具查询：{', '.join(tools_used)}（数据来源：MySQL）"
@@ -277,7 +302,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     t0 = time.time()
 
     def _run() -> dict:
-        return agent.invoke({"user_question": question, "messages": messages})
+        return agent.invoke({"user_question": question, "messages": messages, "session_id": req.session_id or ""})
 
     result = await run_in_threadpool(_run)
     report = result.get("final_report", "（报告生成失败，请查看日志）")
@@ -294,7 +319,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         trace=_build_trace(result),
         usage=_sum_usage(result),
         duration_ms=duration_ms,
-        pending_plans=result.get("pending_plans") or [],
+        pending_plans=[],  # 预算修改执行功能已下线，保留字段兼容旧客户端
+        analysis_run_id=result.get("analysis_run_id") or None,
+        pending_notifications=result.get("pending_notifications") or [],
     )
 
 
@@ -397,15 +424,13 @@ async def chat_stream(req: ChatRequest):
         msg = HumanMessage(content=item["content"]) if item["role"] == "user" else AIMessage(content=item["content"])
         messages.append(msg)
     messages.append(HumanMessage(content=question))
-    inputs = {"user_question": question, "messages": messages}
+    inputs = {"user_question": question, "messages": messages, "session_id": req.session_id or ""}
 
     def sse(event: str, data: str) -> str:
         return f"event: {event}\ndata: {data}\n\n"
 
     async def gen():
         import asyncio
-
-        from agent.graph import agent
 
         t0 = time.time()
         input_tokens = output_tokens = 0
@@ -414,7 +439,9 @@ async def chat_stream(req: ChatRequest):
         report_sections: dict | None = None   # #14 结构化五段（data 链路）
         metrics_cache: dict = {}     # Pandas 计算的核心指标（KPI 卡用）
         factors_cache: list = []     # 归因因子（KPI 卡副注用）
-        pending_plans: list = []     # 待确认执行计划（前端渲染确认按钮）
+        pending_plans: list = []     # 兼容旧字段；预算执行已下线
+        pending_notifications: list = []
+        analysis_run_id: str | None = None
         seen_route = False
         intent_type = ""             # 路由方向（supervisor 事件确定后用于过滤 token 透传）
         saw_report_start = False
@@ -431,6 +458,13 @@ async def chat_stream(req: ChatRequest):
                 meta = event.get("metadata") or {}
                 node = meta.get("langgraph_node", "")
 
+                if kind == "on_chain_start" and node in _NODE_PROGRESS:
+                    yield sse("progress", _NODE_PROGRESS[node])
+                elif kind == "on_tool_start":
+                    tool_progress = _TOOL_PROGRESS.get(event.get("name", ""))
+                    if tool_progress:
+                        yield sse("progress", tool_progress)
+
                 if kind == "on_chain_end" and node == "supervisor" and not seen_route:
                     # 注意：supervisor 会触发两次 on_chain_end——第一次是条件边解析事件
                     # （output=路由目标字符串如 "data"），第二次才是节点真实输出 dict
@@ -444,7 +478,9 @@ async def chat_stream(req: ChatRequest):
                             "正在检索知识库…" if intent_type == "kb" else "正在分析数据…",
                         )
 
-                elif kind == "on_chain_end" and node in ("data_agent", "kb_agent"):
+                elif kind == "on_chain_end" and node in (
+                    "data_agent", "kb_agent", "persist_analysis", "notification_agent", "clarification"
+                ):
                     out = event.get("data", {}).get("output", {}) or {}
                     if isinstance(out, dict):
                         ana = out.get("analysis_result") or {}
@@ -453,10 +489,12 @@ async def chat_stream(req: ChatRequest):
                             metrics_cache = (ana_data or {}).get("metrics", {}) or {}
                         if ana_data.get("factors"):
                             factors_cache = (ana_data or {}).get("factors", []) or []
-                        for p in out.get("pending_plans") or []:
-                            if isinstance(p, dict) and p.get("plan_id") and \
-                                    all(x.get("plan_id") != p["plan_id"] for x in pending_plans):
-                                pending_plans.append(p)
+                        if out.get("analysis_run_id"):
+                            analysis_run_id = out["analysis_run_id"]
+                        for plan in out.get("pending_notifications") or []:
+                            if isinstance(plan, dict) and plan.get("plan_id") and \
+                                    all(x.get("plan_id") != plan["plan_id"] for x in pending_notifications):
+                                pending_notifications.append(plan)
                         fr = out.get("final_report") or ""
                         if fr and len(fr) > len(report_text):
                             report_text = fr
@@ -531,7 +569,9 @@ async def chat_stream(req: ChatRequest):
             "factors": factors_cache,
             "report_sections": report_sections,  # #14 结构化五段（data 链路；kb 为 None）
             "report": report_text,         # 完整报告 markdown（data 结构化链路无 token 事件，供前端回填 history/导出）
-            "pending_plans": pending_plans,   # 待确认执行计划（前端渲染「确认执行」按钮）
+            "pending_plans": pending_plans,
+            "analysis_run_id": analysis_run_id,
+            "pending_notifications": pending_notifications,
             "user_question": question,   # 前端按问题筛 KPI 卡
         }
         yield sse("done", json.dumps(done, ensure_ascii=False))
@@ -552,26 +592,60 @@ class WorkflowRefreshRequest(BaseModel):
     port: int = Field(9222, description="Edge 调试端口")
 
 
-# ============ 自动化执行授权（plan 确认，受 API Token 鉴权保护） ============
+# ============ 旧预算执行接口（已下线，保留兼容提示） ============
 
 @router.post("/execute/confirm")
 def execute_confirm(req: ExecuteConfirmRequest) -> dict:
-    """确认并执行自动化计划（**唯一**能真正执行 update_campaign_budget 的入口）。
-
-    安全设计：LLM 生成的执行计划（dry-run）必须先经用户显式确认——
-    本接口收到 plan_id 后校验计划存在/未过期/未使用，才真正修改数据库。
-    """
-    from tools.execution_plans import confirm_plan
-
-    return confirm_plan(req.plan_id.strip())
+    """已弃用：预算修改能力替换为店长通知授权流，绝不再写业务数据。"""
+    raise HTTPException(status_code=410, detail="推广预算直接修改已下线；请使用店长通知草稿的确认接口。")
 
 
 @router.get("/execute/plans")
 def list_execute_plans() -> dict:
-    """列出所有待确认的执行计划（运营查看）。"""
-    from tools.execution_plans import list_pending_plans
+    raise HTTPException(status_code=410, detail="推广预算执行计划已下线")
 
-    return {"success": True, "plans": list_pending_plans()}
+
+@router.get("/notifications")
+def notifications_list(status: str | None = None, limit: int = 50) -> dict:
+    from services.notifications import list_notification_plans
+
+    with get_session_factory()() as session:
+        return {"success": True, "plans": list_notification_plans(session, status=status, limit=limit)}
+
+
+@router.patch("/notifications/{plan_id}")
+def notifications_edit(plan_id: str, req: NotificationEditRequest) -> dict:
+    from services.notifications import update_notification_text
+
+    try:
+        with get_session_factory()() as session:
+            return {"success": True, "plan": update_notification_text(plan_id, req.message_text, session)}
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/notifications/{plan_id}/confirm")
+def notifications_confirm(plan_id: str) -> dict:
+    from integrations.dingtalk_dws import DingTalkDWSError
+    from integrations.dingtalk_mcp import DingTalkMCPError
+    from services.notifications import confirm_notification_plan
+
+    try:
+        with get_session_factory()() as session:
+            return {"success": True, "plan": confirm_notification_plan(plan_id, session)}
+    except (ValueError, DingTalkDWSError, DingTalkMCPError) as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/notifications/{plan_id}/cancel")
+def notifications_cancel(plan_id: str) -> dict:
+    from services.notifications import cancel_notification_plan
+
+    try:
+        with get_session_factory()() as session:
+            return {"success": True, "plan": cancel_notification_plan(plan_id, session)}
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
 
 
 # ============ LLM provider 运行时切换（#15） ============
@@ -612,16 +686,35 @@ async def workflow_refresh(req: WorkflowRefreshRequest) -> dict:
     全局并发锁：刷新涉及 Edge 重启/登录态注入/下载，**同一时刻只允许一个任务**。
     多标签页/快速连点会触发并发请求互相 kill Edge 导致注入失败（用户侧反复失败根因）。
     """
-    from tools.data_ingest_tool import refresh_market_data
-
     if _refresh_lock.locked():
         return {"success": False, "data": {}, "error": "已有刷新任务进行中，请等待完成后重试"}
     async with _refresh_lock:
         try:
-            result = await refresh_market_data(req.datasets, req.port)
+            from config.settings import settings
+
+            if settings.collector_url:
+                import httpx
+
+                headers = {"Authorization": f"Bearer {settings.api_token}"} if settings.api_token else {}
+                async with httpx.AsyncClient(timeout=660.0) as client:
+                    response = await client.post(
+                        f"{settings.collector_url.rstrip('/')}/api/collector/refresh",
+                        json={"datasets": req.datasets, "port": req.port},
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+            else:
+                from tools.data_ingest_tool import refresh_market_data
+
+                result = await refresh_market_data(req.datasets, req.port)
         except Exception as exc:  # noqa: BLE001
             logger.error("workflow_refresh 未捕获异常：%s", exc, exc_info=True)
-            result = {"success": False, "data": {}, "error": f"服务内部异常：{str(exc)[:150]}"}
+            result = {
+                "success": False,
+                "data": {},
+                "error": f"采集器不可用或刷新失败：{str(exc)[:150]}",
+            }
     if result.get("success"):
         # #7：刷新成功后立即失效数据工具缓存，保证下一次问答拿到最新数据
         from tools.data_cache import invalidate_data_cache
@@ -640,7 +733,7 @@ def rag_documents() -> dict:
 
 @router.post("/rag/upload")
 async def rag_upload(file: UploadFile = File(...)) -> dict:
-    """上传知识文档（md/txt/pdf/docx）→ 解析 → 切分 → 向量化入库。
+    """上传知识文档或表格（md/txt/pdf/docx/csv/xlsx）→ 解析 → 切分 → 向量化入库。
 
     安全（#2）：文件名取 basename（防路径穿越）、白名单后缀、≤20MB、内容非空；
     幂等：仅清理**同名文件**的旧数据，不再按 doc_type 清库（修复误删其他 general 文档）。

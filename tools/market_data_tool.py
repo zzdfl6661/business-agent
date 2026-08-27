@@ -15,11 +15,11 @@ from datetime import date, timedelta
 from langchain_core.tools import tool
 from sqlalchemy import func, select
 
-from config.settings import settings
 from database.mysql import get_session_factory
 from database.models import (
     ConsultReport,
     DataSnapshot,
+    Store,
     TrafficLead,
     TrafficReport,
     TransactionReport,
@@ -50,6 +50,42 @@ def _latest_period_default() -> tuple[date, date]:
     return _latest_period("traffic")
 
 
+def _freshness(dataset: str, period_end: date, max_age_days: int = 8) -> dict:
+    age_days = max((date.today() - period_end).days, 0)
+    return {
+        "dataset": dataset,
+        "period_end": period_end.isoformat(),
+        "age_days": age_days,
+        "max_age_days": max_age_days,
+        "stale": age_days > max_age_days,
+    }
+
+
+def _store_maps(session) -> tuple[dict[int, int], dict[int, str]]:
+    rows = session.execute(select(Store.id, Store.platform_store_id, Store.store_name)).all()
+    platform_to_internal = {
+        int(r.platform_store_id): int(r.id) for r in rows if r.platform_store_id is not None
+    }
+    internal_names = {int(r.id): str(r.store_name) for r in rows}
+    return platform_to_internal, internal_names
+
+
+def _resolve_platform_id(session, internal_store_id: int | None) -> int | None:
+    if internal_store_id is None:
+        return None
+    return session.execute(
+        select(Store.platform_store_id).where(Store.id == internal_store_id)
+    ).scalar_one_or_none()
+
+
+def _mapping_error(store_id: int) -> dict:
+    return {
+        "success": False,
+        "data": {},
+        "error": f"门店 {store_id} 尚未建立经营参谋门店ID映射，请先导入最新经营报表",
+    }
+
+
 @tool
 def get_traffic_data(
     store_id: int | None = None,
@@ -58,7 +94,7 @@ def get_traffic_data(
 ) -> dict:
     """查询客流数据（曝光/访问/意向转化等）。
 
-    参数：store_id 点评门店ID（不传返回全部门店汇总）；days 回看天数（默认取快照最近 7 天）；
+    参数：store_id 系统内部门店ID（不传返回全部门店汇总）；days 回看天数（默认取快照最近 7 天）；
     rank=True 时按'访问人数'降序返回门店排名。
     """
     params = {"store_id": store_id, "days": days, "rank": rank}
@@ -69,8 +105,12 @@ def get_traffic_data(
     try:
         ps, pe = _latest_period("traffic")
         if days:
-            pe = min(pe, ps + timedelta(days=days - 1))
+            ps = max(ps, pe - timedelta(days=days - 1))
         with get_session_factory()() as session:
+            platform_id = _resolve_platform_id(session, store_id)
+            if store_id is not None and platform_id is None:
+                return _mapping_error(store_id)
+            platform_to_internal, internal_names = _store_maps(session)
             stmt = select(
                 TrafficReport.store_id,
                 TrafficReport.store_name,
@@ -85,15 +125,16 @@ def get_traffic_data(
                 TrafficReport.report_date >= ps,
                 TrafficReport.report_date <= pe,
             )
-            if store_id:
-                stmt = stmt.where(TrafficReport.store_id == store_id)
+            if platform_id is not None:
+                stmt = stmt.where(TrafficReport.store_id == platform_id)
             stmt = stmt.group_by(TrafficReport.store_id, TrafficReport.store_name)
             rows = session.execute(stmt).all()
 
         stores = [
             {
-                "store_id": r.store_id,
-                "store_name": r.store_name,
+                "store_id": platform_to_internal.get(int(r.store_id)),
+                "platform_store_id": int(r.store_id),
+                "store_name": internal_names.get(platform_to_internal.get(int(r.store_id)), r.store_name),
                 "exposure_users": int(r.exposure_users or 0),
                 "exposure_views": int(r.exposure_views or 0),
                 "visit_users": int(r.visit_users or 0),
@@ -116,7 +157,8 @@ def get_traffic_data(
                 s["rank"] = i
             stores = stores[:20]
         result = {"success": True, "data": {
-            "period": f"{ps} ~ {pe}", "is_real": True, "total": total, "stores": stores,
+            "period": f"{ps} ~ {pe}", "is_real": True, "freshness": _freshness("traffic", pe),
+            "total": total, "stores": stores,
         }, "error": None}
         cache_set("get_traffic_data", params, result)  # #7 TTL 缓存
         return result
@@ -133,7 +175,7 @@ def get_transaction_data(
 ) -> dict:
     """查询交易数据（下单金额/核销金额/退款等，按门店聚合）。
 
-    参数：store_id 点评门店ID（不传返回全部门店）；days 回看天数；rank=True 按'下单金额'降序排名。
+    参数：store_id 系统内部门店ID（不传返回全部门店）；days 回看天数；rank=True 按'下单金额'降序排名。
     """
     params = {"store_id": store_id, "days": days, "rank": rank}
     cached = cache_get("get_transaction_data", params)
@@ -143,8 +185,12 @@ def get_transaction_data(
     try:
         ps, pe = _latest_period("transaction")
         if days:
-            pe = min(pe, ps + timedelta(days=days - 1))
+            ps = max(ps, pe - timedelta(days=days - 1))
         with get_session_factory()() as session:
+            platform_id = _resolve_platform_id(session, store_id)
+            if store_id is not None and platform_id is None:
+                return _mapping_error(store_id)
+            platform_to_internal, internal_names = _store_maps(session)
             stmt = select(
                 TransactionReport.store_id,
                 TransactionReport.store_name,
@@ -160,15 +206,16 @@ def get_transaction_data(
                 TransactionReport.report_date >= ps,
                 TransactionReport.report_date <= pe,
             )
-            if store_id:
-                stmt = stmt.where(TransactionReport.store_id == store_id)
+            if platform_id is not None:
+                stmt = stmt.where(TransactionReport.store_id == platform_id)
             stmt = stmt.group_by(TransactionReport.store_id, TransactionReport.store_name)
             rows = session.execute(stmt).all()
 
         stores = [
             {
-                "store_id": r.store_id,
-                "store_name": r.store_name,
+                "store_id": platform_to_internal.get(int(r.store_id)),
+                "platform_store_id": int(r.store_id),
+                "store_name": internal_names.get(platform_to_internal.get(int(r.store_id)), r.store_name),
                 "order_users": int(r.order_users or 0),
                 "order_coupons": int(r.order_coupons or 0),
                 "order_amount": round(float(r.order_amount or 0), 2),
@@ -192,7 +239,8 @@ def get_transaction_data(
                 s["rank"] = i
             stores = stores[:20]
         result = {"success": True, "data": {
-            "period": f"{ps} ~ {pe}", "is_real": True, "total": total, "stores": stores,
+            "period": f"{ps} ~ {pe}", "is_real": True, "freshness": _freshness("transaction", pe),
+            "total": total, "stores": stores,
         }, "error": None}
         cache_set("get_transaction_data", params, result)  # #7 TTL 缓存
         return result
@@ -209,7 +257,7 @@ def get_consult_data(
 ) -> dict:
     """查询在线咨询数据（咨询人数/留咨/回复率，按门店聚合）。
 
-    参数：store_id 点评门店ID（不传返回全部门店）；days 回看天数；rank=True 按'咨询人数'降序排名。
+    参数：store_id 系统内部门店ID（不传返回全部门店）；days 回看天数；rank=True 按'咨询人数'降序排名。
     """
     params = {"store_id": store_id, "days": days, "rank": rank}
     cached = cache_get("get_consult_data", params)
@@ -219,8 +267,12 @@ def get_consult_data(
     try:
         ps, pe = _latest_period("consult")
         if days:
-            pe = min(pe, ps + timedelta(days=days - 1))
+            ps = max(ps, pe - timedelta(days=days - 1))
         with get_session_factory()() as session:
+            platform_id = _resolve_platform_id(session, store_id)
+            if store_id is not None and platform_id is None:
+                return _mapping_error(store_id)
+            platform_to_internal, internal_names = _store_maps(session)
             stmt = select(
                 ConsultReport.store_id,
                 ConsultReport.store_name,
@@ -232,15 +284,16 @@ def get_consult_data(
                 ConsultReport.report_date >= ps,
                 ConsultReport.report_date <= pe,
             )
-            if store_id:
-                stmt = stmt.where(ConsultReport.store_id == store_id)
+            if platform_id is not None:
+                stmt = stmt.where(ConsultReport.store_id == platform_id)
             stmt = stmt.group_by(ConsultReport.store_id, ConsultReport.store_name)
             rows = session.execute(stmt).all()
 
         stores = [
             {
-                "store_id": r.store_id,
-                "store_name": r.store_name,
+                "store_id": platform_to_internal.get(int(r.store_id)),
+                "platform_store_id": int(r.store_id),
+                "store_name": internal_names.get(platform_to_internal.get(int(r.store_id)), r.store_name),
                 "consult_users": int(r.consult_users or 0),
                 "consult_leads": int(r.consult_leads or 0),
                 "reply30_rate": round(float(r.reply30_rate or 0), 2),
@@ -259,7 +312,8 @@ def get_consult_data(
                 s["rank"] = i
             stores = stores[:20]
         result = {"success": True, "data": {
-            "period": f"{ps} ~ {pe}", "is_real": True, "total": total, "stores": stores,
+            "period": f"{ps} ~ {pe}", "is_real": True, "freshness": _freshness("consult", pe),
+            "total": total, "stores": stores,
         }, "error": None}
         cache_set("get_consult_data", params, result)  # #7 TTL 缓存
         return result
@@ -299,6 +353,8 @@ def get_store_ranking(
         for src, prefix in ((t.get("stores", []), "traffic"), (tx.get("stores", []), "transaction"), (c.get("stores", []), "consult")):
             for s in src:
                 sid = s["store_id"]
+                if sid is None:  # 未进入门店主数据的外部店不参与可通知排名
+                    continue
                 d = merged.setdefault(sid, {"store_id": sid, "store_name": s.get("store_name", "")})
                 if prefix == "traffic":
                     d["visit_users"] = s.get("visit_users", 0)
@@ -346,6 +402,11 @@ def get_store_ranking(
         period = t.get("period", "")
         result = {"success": True, "data": {
             "period": period,
+            "freshness": {
+                "traffic": t.get("freshness", {}),
+                "transaction": tx.get("freshness", {}),
+                "consult": c.get("freshness", {}),
+            },
             "weights": w,
             "rank": rows[:top_n],
             "total_stores": len(rows),

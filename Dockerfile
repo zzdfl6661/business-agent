@@ -9,9 +9,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# libgomp1：fastembed/ONNX Runtime；curl：容器健康检查。
+# libgomp1：fastembed/ONNX Runtime；curl：容器健康检查；
+# nodejs/npm + dingtalk-mcp：真实钉钉 MCP stdio 客户端。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 curl \
+    && apt-get install -y --no-install-recommends libgomp1 curl nodejs npm \
+    && npm config set fund false \
+    && npm config set audit false \
+    && npm install -g dingtalk-mcp@1.1.21 \
+    && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
 # 先安装锁定依赖，再补 requirements.txt 中不在旧 lock 内的运行时依赖（如 python-docx）。

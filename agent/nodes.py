@@ -20,6 +20,7 @@ import logging
 import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from pydantic import BaseModel, Field
 
 from agent.routing import (
     is_data_question,
@@ -28,11 +29,10 @@ from agent.routing import (
     resolve_intent,
     should_retrieve_operation_knowledge,
 )
-from config.llm_factory import create_llm
+from config.llm_factory import create_llm, get_active_provider
 from config.settings import settings
 from tools import ALL_TOOLS
 from tools.analysis_tool import analysis_business_data
-from tools.browser_tool import update_campaign_budget
 from tools.database_tool import get_campaign_data, get_sales_data, get_store_sales_ranking
 from tools.market_data_tool import get_consult_data, get_store_ranking, get_traffic_data, get_transaction_data
 from tools.rag_tool import search_operation_knowledge
@@ -49,6 +49,10 @@ _QUERY_KEYS = {
     "get_sales_data": "sales",
     "get_store_sales_ranking": "sales_ranking",
     "get_campaign_data": "campaign",
+    "get_traffic_data": "traffic",
+    "get_transaction_data": "transaction",
+    "get_consult_data": "consult",
+    "get_store_ranking": "store_ranking",
 }
 
 KNOWLEDGE_REPORT_PROMPT = """你是连锁门店的内部知识助手，服务对象是门店员工（新员工、店员、店长等）。请用**口语化、自然、清晰**的方式回答制度/流程/话术类问题，让提问者一眼就能看懂、直接用。
@@ -74,7 +78,6 @@ INTENT_SYSTEM_PROMPT = """你是连锁门店经营分析助手。根据用户问
 - refresh_market_data：刷新美团经营数据并入库（用户要求「更新/刷新/下载数据」时调用）
 - analysis_business_data：对数据做指标计算与归因（Pandas 确定性计算）
 - search_operation_knowledge：检索运营知识库（SOP/推广策略/活动规则/诊断案例）
-- update_campaign_budget：为「调整推广预算」生成执行计划（dry-run，返回 plan_id）。**该工具绝不直接修改任何数据**——真正执行必须由用户在界面点击确认（或调用确认接口）后才会发生。生成计划后，回答中要明确告知用户存在待确认的执行计划，引导用户确认或忽略。
 
 要求：
 1. 优先调用数据查询工具获取真实数据；
@@ -97,8 +100,10 @@ REPORT_SYSTEM_PROMPT = """你是经营顾问。基于【数据概览】【分析
 1. 严格按 5 段顺序，每段开头【关键词】方括号包裹，不得加 #/✦/★/「」 等其他符号；
 2. 不得吞字（关键词完整写出）；
 3. 全文不超过 600 字；
-4. 若【数据概览】中存在待确认执行计划（pending_plans，含 plan_id），在【建议】末尾追加一行：
-   ⚠️ 已生成执行计划（计划号 …）：campaign X 预算 A→B，请点击「确认执行」或忽略（10 分钟内有效）。"""
+4. 不得生成或暗示系统会直接修改推广预算等业务数据；
+5. 工具 success=false 或带 error 时表示“该数据不可用”，绝不能改写成“数值为0/没有活动/没有投放”；
+6. 必须遵守 period 与 freshness：过期数据写“数据周期内”，不得称“本周/当前”；建议刷新，但仍可分析历史周期；
+7. “线上交易报表”只代表美团/点评线上口径，不得写成门店全部营业额。"""
 
 
 # ---------------------------------------------------------------- intent
@@ -120,7 +125,7 @@ def intent_node(state: dict) -> dict:
 
     # 常规指标查询的工具集合及参数可以由规则稳定确定。原实现即使 LLM 不调用工具，
     # analysis_node 也会再兜底查 sales/campaign，因此这一次 ReAct 决策既慢又贵。
-    # 涉及执行计划的请求仍保留 LLM tool calling，避免擅自猜测 campaign_id/预算。
+    # 明确日期等复杂参数仍由 LLM 提取，常规问题优先走确定性规划。
     planned = _build_data_tool_plan(question, state.get("store_id"))
     if planned is not None:
         logger.info("确定性数据查询计划：%s", [p["name"] for p in planned])
@@ -160,32 +165,46 @@ def _tool_by_name(name: str):
 def _build_data_tool_plan(question: str, store_id: int | None) -> list[dict] | None:
     """为非执行型数据问题生成确定性查询计划。
 
-    返回 None 表示必须交给 LLM（目前仅预算调整等有副作用的计划生成）。返回空列表
+    返回 None 表示必须交给 LLM 提取复杂参数。返回空列表
     不使用，保证普通问题至少会查询一种真实业务数据。
     """
     q = (question or "").lower()
-    if any(k in q for k in ("调整", "修改", "变更", "执行", "提高预算", "降低预算", "增加预算", "减少预算")):
-        return None
     # 明确起止日期交给 LLM 提取 start_date/end_date，避免规则解析造成口径错误。
     if re.search(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", q):
         return None
+    # 预算调整已下线为不可执行能力，保留 LLM 只用于解释或澄清，不构造写入计划。
+    if "预算" in q and any(word in q for word in ("调整", "修改", "改为", "设置")):
+        return None
 
-    sid = store_id or 1
+    sid = store_id
     days = _extract_query_days(q)
     market = is_market_question(q)
+    ranking_words = ("排名", "排行", "哪家", "最好", "最差", "最高", "最低")
+    broad_analysis = any(k in q for k in ("经营分析", "运营分析", "综合分析", "门店数据", "经营情况", "运营情况"))
     campaign_words = ("推广", "广告", "投放", "roi", "点击", "花费", "消耗", "转化")
     sales_words = ("营业额", "gmv", "销售额", "营收", "收入", "订单", "单量", "客单价", "环比", "同比", "增长", "下降", "趋势", "金额")
     plan: list[dict] = []
     if is_sales_ranking_question(q):
         metric = "sales_volume" if any(k in q for k in ("销量", "销售量")) else "gmv"
         plan = [{"name": "get_store_sales_ranking", "args": {"days": days, "metric": metric, "top_n": 10}}]
-    elif market:
-        plan = [
-            {"name": "get_store_ranking", "args": {"top_n": 10}},
-            {"name": "get_traffic_data", "args": {"rank": True}},
-            {"name": "get_transaction_data", "args": {"rank": True}},
-            {"name": "get_consult_data", "args": {"rank": True}},
-        ]
+    elif market or broad_analysis:
+        if any(k in q for k in ranking_words) and sid is None:
+            plan = [
+                {"name": "get_store_ranking", "args": {"top_n": 10}},
+                {"name": "get_traffic_data", "args": {"rank": True}},
+                {"name": "get_transaction_data", "args": {"rank": True}},
+                {"name": "get_consult_data", "args": {"rank": True}},
+            ]
+        else:
+            common = {"store_id": sid, "days": days, "rank": False}
+            if broad_analysis or any(k in q for k in ("客流", "曝光", "访问", "意向")):
+                plan.append({"name": "get_traffic_data", "args": common})
+            if broad_analysis or any(k in q for k in ("交易", "下单", "核销", "退款", "销量", "销售")):
+                plan.append({"name": "get_transaction_data", "args": common})
+            if broad_analysis or any(k in q for k in ("咨询", "留资", "回复", "响应")):
+                plan.append({"name": "get_consult_data", "args": common})
+            if broad_analysis:
+                plan.insert(0, {"name": "get_sales_data", "args": {"store_id": sid, "days": days}})
     else:
         if any(k in q for k in sales_words):
             plan.append({"name": "get_sales_data", "args": {"store_id": sid, "days": days}})
@@ -217,7 +236,6 @@ def tools_node(state: dict) -> dict:
     planned_calls = list(state.get("tool_plan") or [])
     tool_calls = planned_calls or (getattr(last, "tool_calls", None) or [])
     query_result = dict(state.get("query_result", {}) or {})
-    pending_plans = list(state.get("pending_plans", []) or [])
     tool_messages: list[ToolMessage] = []
 
     for tc in tool_calls:
@@ -241,14 +259,6 @@ def tools_node(state: dict) -> dict:
         else:
             query_result[tc["name"]] = result
 
-        # 自动化执行工具：捕获生成的执行计划（dry-run，待用户确认）到 state.pending_plans
-        if tc["name"] == "update_campaign_budget" and isinstance(result, dict):
-            plan = (result.get("data") or {}) if result.get("success") else {}
-            if plan.get("plan_id") and all(p.get("plan_id") != plan["plan_id"] for p in pending_plans):
-                pending_plans.append(plan)
-                logger.info("捕获待确认执行计划：%s（campaign %s 预算 %s → %s）",
-                            plan["plan_id"], plan.get("campaign_id"), plan.get("old_budget"), plan.get("new_budget"))
-
         # 审计：工具调用记录（执行动作可追溯）
         try:
             from config.logging_setup import audit
@@ -265,7 +275,7 @@ def tools_node(state: dict) -> dict:
         if not planned_calls:
             tool_messages.append(ToolMessage(content=content, tool_call_id=tc["id"], name=tc["name"]))
 
-    return {"messages": tool_messages, "query_result": query_result, "pending_plans": pending_plans, "tool_plan": []}
+    return {"messages": tool_messages, "query_result": query_result, "tool_plan": []}
 
 
 # ---------------------------------------------------------------- analysis
@@ -279,6 +289,9 @@ def analysis_node(state: dict) -> dict:
     query_result = state.get("query_result", {}) or {}
     sales = query_result.get("sales") or {}
     campaign = query_result.get("campaign") or {}
+    traffic = query_result.get("traffic") or query_result.get("get_traffic_data") or {}
+    transaction = query_result.get("transaction") or query_result.get("get_transaction_data") or {}
+    consult = query_result.get("consult") or query_result.get("get_consult_data") or {}
 
     # 知识类问题短路：不查销售/推广数据（intent 已判定，这里保持一致兜底）
     if not is_data_question(state.get("user_question", "") or ""):
@@ -286,18 +299,16 @@ def analysis_node(state: dict) -> dict:
         return {"analysis_result": {"data": {}, "factors": [], "metrics": {}}}
 
     if not sales and not is_market_question(state.get("user_question", "") or ""):
-        # 门店解析结果优先（#6），默认 1 号店
-        store_id = state.get("store_id") or 1
-        logger.info("未获取到工具调用结果，由分析节点直接查询数据（store_id=%s, days=7）", store_id)
-        sales = get_sales_data.invoke({"store_id": store_id, "days": 7})
+        store_id = state.get("store_id")
+        if store_id is not None:
+            logger.info("未获取到工具调用结果，由分析节点直接查询数据（store_id=%s, days=7）", store_id)
+            sales = get_sales_data.invoke({"store_id": store_id, "days": 7})
+        else:
+            sales = {"success": False, "data": {}, "error": "缺少目标门店，未默认使用1号门店"}
     # 仅当问题确实涉及推广或 LLM 主动取过推广数据时才查，避免销售问答额外聚合一份推广报表。
     if not campaign and any(k in (state.get("user_question", "") or "").lower()
                             for k in ("推广", "广告", "投放", "roi", "点击", "花费", "消耗", "转化")):
-        campaign = get_campaign_data.invoke({"store_id": state.get("store_id") or 1})
-
-    analysis = analysis_business_data.invoke(
-        {"sales_data": sales, "campaign_data": campaign}
-    )
+        campaign = get_campaign_data.invoke({"store_id": state.get("store_id")})
 
     # 市场数据兜底：销售排名与客流/交易/咨询类问题，LLM 未调用时确定性补查
     question = state.get("user_question", "")
@@ -312,19 +323,37 @@ def analysis_node(state: dict) -> dict:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("兜底查询门店销售排名失败：%s", exc)
     elif is_market_question(question):
+        ranking = any(k in question for k in ("排名", "排行", "哪家", "最好", "最差", "最高", "最低"))
+        sid = state.get("store_id")
         for tool, key in (
-            (get_store_ranking, "get_store_ranking"),
-            (get_traffic_data, "get_traffic_data"),
-            (get_transaction_data, "get_transaction_data"),
-            (get_consult_data, "get_consult_data"),
+            (get_store_ranking, "store_ranking"),
+            (get_traffic_data, "traffic"),
+            (get_transaction_data, "transaction"),
+            (get_consult_data, "consult"),
         ):
             if key not in query_result:
                 try:
-                    kwargs = {"top_n": 10} if key == "get_store_ranking" else {"rank": True}
+                    if key == "store_ranking":
+                        if not ranking:
+                            continue
+                        kwargs = {"top_n": 10}
+                    else:
+                        kwargs = {"store_id": sid, "days": _extract_query_days(question), "rank": ranking}
                     query_result[key] = tool.invoke(kwargs)
                     logger.info("兜底查询 %s ✓", key)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("兜底查询 %s 失败：%s", key, exc)
+
+    traffic = query_result.get("traffic") or traffic
+    transaction = query_result.get("transaction") or transaction
+    consult = query_result.get("consult") or consult
+    analysis = analysis_business_data.invoke({
+        "sales_data": sales,
+        "campaign_data": campaign,
+        "traffic_data": traffic,
+        "transaction_data": transaction,
+        "consult_data": consult,
+    })
 
     return {
         "analysis_result": analysis,
@@ -340,40 +369,42 @@ REWRITE_PROMPT = """你是知识库检索查询优化器。用户问题将用于
    补充领域关键词（如"门店数量"→"门店数量 门店规模 直营与合作门店"）、保留专有名词（人名/品牌/制度名）。
 2. "hypothetical_answer"：写一段 60 字以内的假设答案（允许基于常识推断、允许虚构，仅用于语义向量检索）。
 
-输出格式（严格 JSON）：
-{"queries": ["改写1", "改写2"], "hypothetical_answer": "假设答案"}
-
 示例：
 问题：公司有多少门店？
 输出：{"queries": ["公司的门店数量 门店规模 直营和合作门店分布", "杭州欢愉公司全国直营合作门店总数"], "hypothetical_answer": "杭州欢愉商业经营管理有限公司在全国拥有30多家直营和合作门店，分布在北京、上海、杭州、苏州、常州等城市，总部在杭州。"}"""
 
 
-def _rewrite_query(question: str) -> tuple[list[str], str]:
+class QueryRewriteResult(BaseModel):
+    queries: list[str] = Field(default_factory=list, description="最多两条实体保持型检索改写")
+    hypothetical_answer: str = Field(default="", description="仅概念/流程问题使用的 60 字内 HyDE 文本")
+
+
+def _is_precise_lookup(question: str) -> bool:
+    """数字、人员和制度名称类问题不启用 HyDE，避免虚构语义稀释精确召回。"""
+    q = question or ""
+    return bool(re.search(r"\d", q)) or any(k in q for k in ("多少", "名单", "姓名", "谁", "编号", "电话", "制度"))
+
+
+def _rewrite_query(question: str, history: list[dict] | None = None) -> tuple[list[str], str]:
     """Query Rewrite + HyDE：LLM 把疑问句改写成检索友好的陈述句，并生成一段假设答案。
 
     返回 (queries, hyde_answer)；任何失败降级为 (原问题, "")，不影响主流程。
     仅知识问答链路调用（经营分析保持原问题检索，防延迟/稀释）。
     """
     try:
-        import json as _json
-
-        llm = create_llm()
-        resp = llm.invoke(
-            [
-                SystemMessage(content=REWRITE_PROMPT),
-                HumanMessage(content=f"问题：{question}"),
-            ],
-            max_tokens=300,
+        history_text = "；".join(
+            f"{item.get('role', '')}:{str(item.get('content', ''))[:120]}"
+            for item in (history or [])[-4:]
         )
-        text = resp.content if isinstance(resp.content, str) else str(resp.content)
-        # 容错：截取 JSON 块
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end == -1:
-            return [question], ""
-        data = _json.loads(text[start : end + 1])
-        queries = [q.strip() for q in data.get("queries", []) if isinstance(q, str) and q.strip()]
-        hyde = (data.get("hypothetical_answer") or "").strip()
-        return (queries[:3] or [question]), hyde
+        llm = create_llm().with_structured_output(QueryRewriteResult)
+        result = llm.invoke([
+            SystemMessage(content=REWRITE_PROMPT),
+            HumanMessage(content=f"最近对话：{history_text or '无'}\n当前问题：{question}"),
+        ], max_tokens=300)
+        parsed = result if isinstance(result, QueryRewriteResult) else QueryRewriteResult.model_validate(result)
+        queries = [q.strip() for q in parsed.queries if isinstance(q, str) and q.strip()]
+        hyde = "" if _is_precise_lookup(question) else (parsed.hypothetical_answer or "").strip()[:120]
+        return (queries[:2] or [question]), hyde
     except Exception as exc:  # noqa: BLE001
         logger.warning("Query Rewrite 失败，降级用原问题：%s", exc)
         return [question], ""
@@ -384,13 +415,53 @@ def _dedup_docs(docs: list[dict], limit: int) -> list[dict]:
     seen: set = set()
     out: list[dict] = []
     for d in docs:
-        key = str(d.get("content", ""))[:80]
+        metadata = d.get("metadata") or {}
+        if metadata.get("table_format") and metadata.get("table_row") is not None:
+            key = (
+                f"{metadata.get('source', '')}#"
+                f"{metadata.get('sheet_name', '')}#r{metadata.get('table_row')}"
+            )
+        else:
+            key = str(d.get("content", ""))[:80]
         if key not in seen:
             seen.add(key)
             out.append(d)
         if len(out) >= limit:
             break
     return out
+
+
+def _fuse_query_routes(routes: list[list[dict]], limit: int) -> list[dict]:
+    """跨查询 RRF 融合；单查询内部仍沿用向量 + BM25 的既有混合检索。"""
+    merged: dict[str, tuple[dict, float]] = {}
+    for route in routes:
+        for rank, doc in enumerate(route, start=1):
+            meta = doc.get("metadata") or {}
+            key = f"{meta.get('source', '')}#{meta.get('sheet_name', '')}#{meta.get('table_row', '')}#{str(doc.get('content', ''))[:80]}"
+            score = 1.0 / (60 + rank)
+            base, total = merged.get(key, (doc, 0.0))
+            merged[key] = (base, total + score)
+    fused = []
+    for doc, score in sorted(merged.values(), key=lambda item: item[1], reverse=True):
+        item = dict(doc)
+        item["multi_query_rrf"] = round(score, 6)
+        fused.append(item)
+    return _dedup_docs(fused, limit)
+
+
+def _retrieval_doc_payload(doc: dict, content_limit: int) -> dict:
+    """生成报告上下文；表格优先使用命中的行，避免整表父块截断掉目标记录。"""
+    metadata = doc.get("metadata") or {}
+    payload = {
+        "content": (doc.get("matched_content") or doc.get("content") or "")[:content_limit],
+        "source": metadata.get("source", ""),
+        "score": doc.get("score"),
+    }
+    if metadata.get("sheet_name"):
+        payload["sheet"] = metadata["sheet_name"]
+    if metadata.get("table_row") is not None:
+        payload["row"] = metadata["table_row"]
+    return payload
 
 
 def rag_node(state: dict) -> dict:
@@ -413,16 +484,24 @@ def rag_node(state: dict) -> dict:
         # 低置信度时才支付 Query Rewrite + HyDE 的额外模型调用成本。
         raw_docs = search_operation_knowledge.invoke({"query": question, "top_k": 3})
         best_score = max((float(d.get("score") or 0) for d in raw_docs), default=0.0)
-        if len(raw_docs) >= 2 and best_score >= RAG_REWRITE_TRIGGER_SCORE:
+        sources = {(d.get("metadata") or {}).get("source") for d in raw_docs} - {None, ""}
+        score_values = sorted((float(d.get("score") or 0) for d in raw_docs), reverse=True)
+        score_gap = score_values[0] - score_values[1] if len(score_values) > 1 else 0.0
+        if len(raw_docs) >= 2 and best_score >= RAG_REWRITE_TRIGGER_SCORE and (len(sources) >= 2 or score_gap >= 0.05):
             docs = _dedup_docs(raw_docs, 5)
             logger.info("kb 原问题高置信命中：%s 条，最高分 %.3f，跳过改写", len(docs), best_score)
         else:
-            rewritten, hyde = _rewrite_query(question)
+            history = []
+            for message in (state.get("messages") or [])[-6:]:
+                content = getattr(message, "content", "")
+                if isinstance(content, str) and content.strip():
+                    history.append({"role": getattr(message, "type", ""), "content": content})
+            rewritten, hyde = _rewrite_query(question, history)
             cands = [q for q in rewritten if q and q != question]
             if hyde:
                 cands.append(hyde)
 
-            async def _parallel_retrieve() -> list[dict]:
+            async def _parallel_retrieve() -> list[list[dict]]:
                 async def _one(q: str) -> list[dict]:
                     try:
                         return await asyncio.to_thread(
@@ -432,20 +511,19 @@ def rag_node(state: dict) -> dict:
                         logger.warning("检索 %s 失败：%s", q[:30], exc)
                         return []
 
-                pooled = await asyncio.gather(*[_one(q) for q in cands[:3]])
-                return [d for batch in pooled for d in batch]
+                return await asyncio.gather(*[_one(q) for q in cands[:3]])
 
             try:
                 pooled = asyncio.run(_parallel_retrieve())
             except Exception as exc:  # noqa: BLE001 极端情况（无事件循环等）退串行
                 logger.warning("kb 并行检索失败，退串行：%s", exc)
-                pooled = []
+                pooled: list[list[dict]] = []
                 for q in cands[:3]:
                     try:
-                        pooled.extend(search_operation_knowledge.invoke({"query": q, "top_k": 3}))
+                        pooled.append(search_operation_knowledge.invoke({"query": q, "top_k": 3}))
                     except Exception as exc2:  # noqa: BLE001
                         logger.warning("检索 %s 失败：%s", q[:30], exc2)
-            docs = _dedup_docs(list(raw_docs) + pooled, 6)
+            docs = _fuse_query_routes([raw_docs] + pooled, 6)
             logger.info("kb 低置信检索：原问题 + 改写%s + HyDE%s → %s 条去重",
                         len(rewritten), "✓" if hyde else "✗", len(docs))
     elif should_retrieve_operation_knowledge(question, state.get("intent_type", "data")):
@@ -496,9 +574,6 @@ def rag_node(state: dict) -> dict:
 # #14 结构化报告：data 链路用 with_structured_output 输出五段 JSON（前端直接渲染，
 # 告别"prompt 自律 + 前端正则兜底"与内部字段名泄漏）；kb 链路保持口语化 markdown。
 
-from pydantic import BaseModel, Field
-
-
 class ReportSections(BaseModel):
     """经营诊断报告五段结构化输出（#14）。"""
 
@@ -521,8 +596,7 @@ REPORT_STRUCTURED_PROMPT = """你是经营顾问。基于【数据概览】【�
 硬性要求：
 1. 内容面向店长可读，禁止原样引用内部数据结构字段名；
 2. **五个字段都必须是字符串数组**（如 "summary": ["结论一", "结论二"]），禁止输出 markdown 代码块（```json 等）或任何多余说明文字；
-3. 若【数据概览】中存在待确认执行计划（pending_plans，含 plan_id），在 actions 末尾追加一条：
-   「⚠️ 已生成执行计划（计划号 …）：campaign X 预算 A→B，请点击『确认执行』或忽略（10 分钟内有效）」；
+3. 不得生成或暗示系统会直接修改推广预算等业务数据；
 4. 全文合计不超过 600 字。"""
 
 
@@ -578,6 +652,144 @@ def _sections_to_markdown(sections: dict) -> str:
         _block("建议", sections.get("actions", [])),
         _block("风险提示", sections.get("risks", [])),
     ])
+
+
+def _format_metric(value, suffix: str = "") -> str:
+    """经营报告中展示数字的轻量确定性格式化。"""
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        text = f"{value:,.2f}".rstrip("0").rstrip(".")
+    else:
+        text = f"{value:,}" if isinstance(value, int) else str(value)
+    return f"{text}{suffix}"
+
+
+def _deterministic_report_sections(state: dict) -> dict:
+    """直接由已校验的指标与归因构造报告，避免不稳定模型重复生成造成长时间空等待。"""
+    analysis = ((state.get("analysis_result") or {}).get("data") or {})
+    metrics = analysis.get("metrics") or {}
+    factors = analysis.get("factors") or []
+    freshness = analysis.get("data_freshness") or {}
+
+    summary: list[str] = []
+    if metrics.get("online_order_amount") is not None:
+        orders = metrics.get("online_order_coupons", metrics.get("order_count"))
+        order_text = f"，成交 {_format_metric(orders)} 单" if orders is not None else ""
+        summary.append(f"数据周期内线上下单金额 {_format_metric(metrics['online_order_amount'], ' 元')}{order_text}。")
+    elif metrics.get("gmv") is not None:
+        summary.append(f"数据周期内交易金额 {_format_metric(metrics['gmv'], ' 元')}。")
+    if metrics.get("visit_intention_rate") is not None:
+        summary.append(f"访问到意向转化率为 {_format_metric(metrics['visit_intention_rate'], '%')}，需结合页面与套餐展示持续优化。")
+    if metrics.get("reply5_rate") is not None:
+        summary.append(f"5 分钟内咨询回复率为 {_format_metric(metrics['reply5_rate'], '%')}，需关注高峰时段的响应能力。")
+    if not summary:
+        summary.append("已完成本次经营数据汇总，请结合关键指标和归因继续跟进。")
+
+    metric_rows = [
+        ("线上下单金额", metrics.get("online_order_amount"), " 元"),
+        ("成交订单数", metrics.get("online_order_coupons", metrics.get("order_count")), " 单"),
+        ("访问到意向转化率", metrics.get("visit_intention_rate"), "%"),
+        ("退款率", metrics.get("refund_rate"), "%"),
+        ("5 分钟内回复率", metrics.get("reply5_rate"), "%"),
+    ]
+    metric_text = [f"{name}：{_format_metric(value, suffix)}" for name, value, suffix in metric_rows if value is not None][:4]
+
+    factor_text: list[str] = []
+    action_text: list[str] = []
+    for factor in factors:
+        if not isinstance(factor, dict):
+            continue
+        impact = str(factor.get("impact") or "").strip()
+        evidence = str(factor.get("evidence") or "").strip()
+        suggestion = str(factor.get("suggestion") or "").strip()
+        if impact:
+            factor_text.append(f"{impact}{'：' + evidence if evidence else ''}")
+        if suggestion:
+            action_text.append(suggestion)
+
+    stale = any(isinstance(value, dict) and value.get("stale") for value in freshness.values())
+    risks: list[str] = []
+    if stale:
+        factor_text.append("当前数据存在时效滞后，结论需在获取最新报表后复核。")
+        action_text.append("优先补齐最新周期数据，再复核趋势与执行优先级。")
+        risks.append("数据时效滞后可能导致经营判断与当前实际情况存在偏差。")
+    if metrics.get("refund_rate") is not None and float(metrics["refund_rate"]) > 0:
+        risks.append(f"退款率为 {_format_metric(metrics['refund_rate'], '%')}，需跟踪退款原因并及时改善体验。")
+    if not factor_text:
+        factor_text.append("暂未识别到可量化的异常归因，建议持续观察后续周期变化。")
+    if not action_text:
+        action_text.append("围绕关键指标设置负责人和复盘周期，持续跟踪改善效果。")
+    if not risks:
+        risks.append("当前结论仅反映已采集的数据周期，重大活动或异常需单独复核。")
+
+    return {
+        "summary": summary[:3],
+        "metrics": metric_text,
+        "factors": factor_text[:3],
+        "actions": action_text[:3],
+        "risks": risks[:2],
+    }
+
+
+def _uses_sensenova_agent_model() -> bool:
+    """SenseNova 6.8 Agent 兼容端点会优先只输出推理，数据报告改走确定性渲染。"""
+    model = (settings.openai_compatible_model or settings.openai_model or "").lower()
+    return get_active_provider() == "openai_compatible" and "sensenova-6.8" in model
+
+
+def _enforce_report_facts(state: dict, sections: dict) -> dict:
+    """对 LLM 报告执行确定性口径校验，防止把缺失数据写成 0 或误称当前周期。"""
+    analysis = ((state.get("analysis_result") or {}).get("data") or {})
+    freshness = analysis.get("data_freshness", {}) or {}
+    stale = any(isinstance(v, dict) and v.get("stale") for v in freshness.values())
+    query_result = state.get("query_result") or {}
+    campaign = query_result.get("campaign") or {}
+    campaign_unavailable = isinstance(campaign, dict) and campaign.get("success") is False
+    sales_summary = (((query_result.get("sales") or {}).get("data") or {}).get("summary") or {})
+    online_scope = "线上交易报表" in str(sales_summary.get("data_source", ""))
+
+    invalid_campaign_phrases = ("无推广", "没有推广", "未投放", "无任何推广", "没有投放")
+    cleaned: dict[str, list[str]] = {}
+    for key, values in (sections or {}).items():
+        items: list[str] = []
+        for raw in values or []:
+            text_item = str(raw)
+            if campaign_unavailable and any(p in text_item for p in invalid_campaign_phrases):
+                text_item = "单店推广报表缺少门店维度，暂不能判断该店投放情况"
+            if stale:
+                text_item = text_item.replace("本周", "数据周期内").replace("本月", "数据周期内")
+            if online_scope:
+                text_item = text_item.replace("线上营业额", "线上下单金额").replace("营业额", "线上下单金额")
+            items.append(text_item)
+        cleaned[key] = items
+    return cleaned
+
+
+def _enforce_report_text(state: dict, report: str) -> str:
+    """Markdown 回退路径使用的同等事实校验。"""
+    analysis = ((state.get("analysis_result") or {}).get("data") or {})
+    freshness = analysis.get("data_freshness", {}) or {}
+    stale = any(isinstance(v, dict) and v.get("stale") for v in freshness.values())
+    query_result = state.get("query_result") or {}
+    campaign = query_result.get("campaign") or {}
+    campaign_unavailable = isinstance(campaign, dict) and campaign.get("success") is False
+    sales_summary = (((query_result.get("sales") or {}).get("data") or {}).get("summary") or {})
+    online_scope = "线上交易报表" in str(sales_summary.get("data_source", ""))
+    invalid_campaign_phrases = ("无推广", "没有推广", "未投放", "无任何推广", "没有投放")
+
+    lines: list[str] = []
+    for raw in (report or "").splitlines():
+        line = raw
+        if campaign_unavailable and any(p in line for p in invalid_campaign_phrases):
+            prefix = "- " if line.lstrip().startswith("-") else ""
+            line = prefix + "单店推广报表缺少门店维度，暂不能判断该店投放情况"
+        if stale:
+            line = line.replace("本周", "数据周期内").replace("本月", "数据周期内")
+        if online_scope:
+            line = line.replace("线上营业额", "线上下单金额").replace("营业额", "线上下单金额")
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _refresh_prefix(state: dict, report: str) -> str:
@@ -643,40 +855,53 @@ def _report_structured(state: dict, llm, messages: list) -> dict:
     返回 {"final_report", "report_sections"}。
     """
     sections: dict | None = None
-    try:
-        structured_llm = llm.with_structured_output(ReportSections)
-        result = structured_llm.invoke(messages, max_tokens=DATA_REPORT_MAX_TOKENS)
-        sections = result.model_dump() if hasattr(result, "model_dump") else dict(result or {})
-        if not sections:
-            raise ValueError("with_structured_output 返回空")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("结构化方案一（with_structured_output）失败，转方案二（prompt JSON）：%s", str(exc)[:120])
+    # SenseNova 的 OpenAI 兼容端点不接受 LangChain 的 schema/tool 约束（会立即 400），
+    # 直接走提示词 JSON/Markdown 路径，少一次无意义的失败请求和长等待。
+    if get_active_provider() != "openai_compatible":
+        try:
+            structured_llm = llm.with_structured_output(ReportSections)
+            result = structured_llm.invoke(messages, max_tokens=DATA_REPORT_MAX_TOKENS)
+            sections = result.model_dump() if hasattr(result, "model_dump") else dict(result or {})
+            if not sections:
+                raise ValueError("with_structured_output 返回空")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("结构化方案一（with_structured_output）失败，转兼容文本：%s", str(exc)[:120])
+
+    if sections is None:
         try:
             response = llm.invoke(messages, max_tokens=DATA_REPORT_MAX_TOKENS)
-            text = response.content if isinstance(response.content, str) else str(response.content)
-            sections = _parse_report_sections(text)
-        except Exception as exc2:  # noqa: BLE001 连 prompt JSON 也失败 → 流式 markdown
-            logger.warning("结构化方案二（prompt JSON）失败，回退流式 markdown：%s", str(exc2)[:120])
+            text = (response.content if isinstance(response.content, str) else str(response.content)).strip()
+            try:
+                sections = _parse_report_sections(text)
+            except ValueError:
+                # 兼容模型有时会遵从内容要求但不返回 JSON。该回答已经是可读报告，
+                # 不再为“变成 JSON”重复调用模型，直接经过事实校验后交给前端渲染。
+                if text:
+                    return {"final_report": _refresh_prefix(state, _enforce_report_text(state, text))}
+                raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("兼容文本报告失败，回退流式 markdown：%s", str(exc)[:120])
             report = _stream_report(llm, messages, max_tokens=DATA_REPORT_MAX_TOKENS)
-            # 兜底再结构化：模型可能把 JSON 当 markdown 原样输出（第三方流式不稳），
-            # 若仍能解析出五段 → 渲染卡片；否则保留 markdown 文本
             try:
                 sec = _parse_report_sections(report)
+                sec = _enforce_report_facts(state, sec)
                 return {"final_report": _refresh_prefix(state, _sections_to_markdown(sec)), "report_sections": sec}
             except Exception:  # noqa: BLE001 确非 JSON → 原样 markdown
-                return {"final_report": _refresh_prefix(state, report)}
+                return {"final_report": _refresh_prefix(state, _enforce_report_text(state, report))}
 
+    sections = _enforce_report_facts(state, sections)
     report = _sections_to_markdown(sections).strip()
     if not report:
         logger.warning("结构化输出为空，回退流式 markdown")
         report = _stream_report(llm, messages, max_tokens=DATA_REPORT_MAX_TOKENS)
         try:
             sec = _parse_report_sections(report)
+            sec = _enforce_report_facts(state, sec)
             return {"final_report": _refresh_prefix(state, _sections_to_markdown(sec)), "report_sections": sec}
         except Exception:  # noqa: BLE001 确非 JSON → 原样 markdown
-            return {"final_report": _refresh_prefix(state, report)}
+            return {"final_report": _refresh_prefix(state, _enforce_report_text(state, report))}
 
-    report = _refresh_prefix(state, report)
+    report = _refresh_prefix(state, _enforce_report_text(state, report))
     _ingest_report_to_kb(report, state)  # 经验层：经营诊断报告自动入库
     logger.info("报告生成（结构化）：%s 条建议 / %s 条风险", len(sections.get("actions", [])), len(sections.get("risks", [])))
     return {"final_report": report, "report_sections": sections}
@@ -702,6 +927,13 @@ def report_node(state: dict) -> dict:
         report = _stream_report(llm, messages, max_tokens=1200)  # 正文限 350 字，1200 足够
         return {"final_report": report}
 
+    if _uses_sensenova_agent_model():
+        sections = _enforce_report_facts(state, _deterministic_report_sections(state))
+        report = _refresh_prefix(state, _sections_to_markdown(sections))
+        _ingest_report_to_kb(report, state)
+        logger.info("报告生成（确定性渲染）：SenseNova 6.8 兼容端点跳过空正文重试")
+        return {"final_report": report, "report_sections": sections}
+
     messages = [
         SystemMessage(content=REPORT_STRUCTURED_PROMPT),
         HumanMessage(content=_build_report_input(state)),
@@ -724,20 +956,8 @@ def _trim_market(result: dict | None, top_n: int = 10) -> dict:
 
 
 def _pending_plans_summary(state: dict) -> list[dict]:
-    """待确认执行计划摘要（供报告节点提示用户确认）。"""
-    out = []
-    for p in (state.get("pending_plans") or [])[:5]:
-        if not isinstance(p, dict):
-            continue
-        out.append({
-            "plan_id": p.get("plan_id"),
-            "action": p.get("action", "update_campaign_budget"),
-            "campaign_id": p.get("campaign_id"),
-            "old_budget": p.get("old_budget"),
-            "new_budget": p.get("new_budget"),
-            "reason": (p.get("reason") or "")[:80],
-        })
-    return out
+    """兼容旧报告输入；预算执行功能已下线，始终为空。"""
+    return []
 
 
 def _build_report_input(state: dict) -> str:
@@ -770,11 +990,7 @@ def _build_report_input(state: dict) -> str:
             "user_question": question,
             "recent_history": recent[-4:],
             "retrieval_docs": [
-                {
-                    "content": d.get("content", "")[:450],  # 保留条款完整性（kb 需要完整条款）
-                    "source": d.get("metadata", {}).get("source", ""),
-                    "score": d.get("score"),
-                }
+                _retrieval_doc_payload(d, 450)
                 for d in (state.get("retrieval_docs") or [])[:5]
             ],
         }, ensure_ascii=False, default=str)
@@ -794,14 +1010,14 @@ def _build_report_input(state: dict) -> str:
         summary = {
             "user_question": question,
             "query_result": {
-                "traffic": _trim_market(query_result.get("get_traffic_data")),
-                "transaction": _trim_market(query_result.get("get_transaction_data")),
-                "consult": _trim_market(query_result.get("get_consult_data")),
-                "ranking": _trim_market(query_result.get("get_store_ranking"), 10),
+                "traffic": _trim_market(query_result.get("traffic") or query_result.get("get_traffic_data")),
+                "transaction": _trim_market(query_result.get("transaction") or query_result.get("get_transaction_data")),
+                "consult": _trim_market(query_result.get("consult") or query_result.get("get_consult_data")),
+                "ranking": _trim_market(query_result.get("store_ranking") or query_result.get("get_store_ranking"), 10),
             },
             "analysis_result": state.get("analysis_result", {}),
             "retrieval_docs": [
-                {"content": d.get("content", "")[:120], "source": d.get("metadata", {}).get("source", ""), "score": d.get("score")}
+                _retrieval_doc_payload(d, 120)
                 for d in (state.get("retrieval_docs") or [])[:3]
             ],
             "pending_plans": _pending_plans_summary(state),
@@ -825,6 +1041,9 @@ def _build_report_input(state: dict) -> str:
     campaign_trim = dict(campaign_data)
     campaign_trim["campaigns"] = campaigns[:3]
     campaign_trim["campaign_total_count"] = len(campaigns)
+    campaign_trim["available"] = bool(isinstance(campaign, dict) and campaign.get("success"))
+    if isinstance(campaign, dict) and campaign.get("error"):
+        campaign_trim["error"] = campaign.get("error")
 
     # 数据刷新结果摘要（供报告说明"已刷新到最新"）
     refresh = query_result.get("refresh_market_data", {}) or {}
@@ -840,15 +1059,15 @@ def _build_report_input(state: dict) -> str:
         "query_result": {
             "sales": sales_trim,
             "campaign": campaign_trim,
-            "traffic": _trim_market(query_result.get("get_traffic_data")),
-            "transaction": _trim_market(query_result.get("get_transaction_data")),
-            "consult": _trim_market(query_result.get("get_consult_data")),
-            "ranking": _trim_market(query_result.get("get_store_ranking"), 10),
+            "traffic": _trim_market(query_result.get("traffic") or query_result.get("get_traffic_data")),
+            "transaction": _trim_market(query_result.get("transaction") or query_result.get("get_transaction_data")),
+            "consult": _trim_market(query_result.get("consult") or query_result.get("get_consult_data")),
+            "ranking": _trim_market(query_result.get("store_ranking") or query_result.get("get_store_ranking"), 10),
             "refresh": refresh_summary,
         },
         "analysis_result": state.get("analysis_result", {}),
         "retrieval_docs": [
-            {"content": d.get("content", "")[:120], "source": d.get("metadata", {}).get("source", ""), "score": d.get("score")}
+            _retrieval_doc_payload(d, 120)
             for d in (state.get("retrieval_docs") or [])[:3]
         ],
         "pending_plans": _pending_plans_summary(state),

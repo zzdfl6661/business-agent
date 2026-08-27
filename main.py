@@ -54,7 +54,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="企业经营智能决策与自动化执行 Agent",
-    description="数据获取 → 数据分析 → 问题诊断 → 策略生成 → 自动执行",
+    description="数据获取 → 数据分析 → 问题诊断 → 店长通知草稿 → 人工确认（dry-run）",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -98,6 +98,11 @@ def health() -> dict:
         "service": "business-agent",
         "llm_provider": settings.llm_provider,
         "database": check_connection(),
+        "notification": {
+            "enabled": settings.dingtalk_enabled,
+            "mode": settings.dingtalk_mode,
+            "mcp_status": "disabled" if not settings.dingtalk_enabled or settings.dingtalk_mode != "live" else "configured",
+        },
     }
 
 

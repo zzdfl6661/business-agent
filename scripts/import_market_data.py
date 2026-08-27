@@ -9,10 +9,11 @@
 - 客流/交易/在线咨询：period 2026-08-04 ~ 2026-08-10（近 7 天）
 - 所有明细表保留 report_date（单日粒度）+ period_start/period_end（7 天区间）
 
-幂等：导入前删除对应 dataset 的旧数据与快照，可重复执行。
+幂等：只覆盖相同数据周期，保留其他周期与每次导入快照，可重复执行。
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -29,11 +30,13 @@ from database.models import (  # noqa: E402
     ConsultReport,
     DataSnapshot,
     PromotionReport,
+    Store,
     TrafficLead,
     TrafficReport,
     TransactionReport,
 )
-from database.mysql import create_db_if_not_exists, get_engine, get_session_factory  # noqa: E402
+from database.mysql import get_session_factory, init_db  # noqa: E402
+from services.store_mapping import build_platform_mapping  # noqa: E402
 
 SC = Path(__file__).resolve().parent.parent / "data" / "scraped"
 YEAR = 2026
@@ -106,6 +109,11 @@ def _parse_period(fname: str) -> tuple[date, date, date | None, date | None]:
     return date(2026, 8, 3), date(2026, 8, 9), date(2026, 7, 27), date(2026, 8, 2)
 
 
+def _period_from_rows(rows: list[dict], fallback: tuple[date, date]) -> tuple[date, date]:
+    dates = [r.get("report_date") for r in rows if r.get("report_date")]
+    return (min(dates), max(dates)) if dates else fallback
+
+
 def load_promotion():
     """智选展位 4 维度 → promotion_reports（dimension: time/adv/aud/cre）
 
@@ -169,7 +177,7 @@ def load_traffic():
     """客流分析：变化趋势(traffic_reports) + 引流用户(traffic_leads)"""
     period_start, period_end = date(2026, 8, 4), date(2026, 8, 10)
     traffic, leads = [], []
-    fp1 = next(SC.glob("客流分析_1_客流数据*.xlsx"), None)
+    fp1 = _latest_file("客流分析_1_客流数据*.xlsx")
     if fp1:
         df = pd.read_excel(fp1)
         for _, r in df.iterrows():
@@ -187,7 +195,7 @@ def load_traffic():
                 "checkin_new": to_int(r.get("新增打卡人数")),
                 "period_start": period_start, "period_end": period_end,
             })
-    fp3 = next(SC.glob("客流分析_3_引流用户数据*.xlsx"), None)
+    fp3 = _latest_file("客流分析_3_引流用户数据*.xlsx")
     if fp3:
         df = pd.read_excel(fp3)
         for _, r in df.iterrows():
@@ -207,6 +215,9 @@ def load_traffic():
                 "went_other": to_int(r.get("去了其他门店")),
                 "period_start": period_start, "period_end": period_end,
             })
+    period_start, period_end = _period_from_rows(traffic + leads, (period_start, period_end))
+    for row in traffic + leads:
+        row["period_start"], row["period_end"] = period_start, period_end
     return traffic, leads, period_start, period_end
 
 
@@ -214,7 +225,9 @@ def load_transaction():
     """交易分析-商品明细（1434 行明细版）"""
     period_start, period_end = date(2026, 8, 4), date(2026, 8, 10)
     rows = []
-    fp = sorted(SC.glob("商品交易数据-2026*.xlsx"), key=lambda p: p.stat().st_size, reverse=True)[0]
+    fp = _latest_file("商品交易数据-2026*.xlsx")
+    if fp is None:
+        return rows, period_start, period_end
     df = pd.read_excel(fp)
     for _, r in df.iterrows():
         rows.append({
@@ -231,6 +244,9 @@ def load_transaction():
             "refund_coupons": to_int(r.get("退款券数")), "refund_amount": to_dec(r.get("退款金额（原价）")),
             "period_start": period_start, "period_end": period_end,
         })
+    period_start, period_end = _period_from_rows(rows, (period_start, period_end))
+    for row in rows:
+        row["period_start"], row["period_end"] = period_start, period_end
     return rows, period_start, period_end
 
 
@@ -238,7 +254,7 @@ def load_consult():
     """在线咨询：总览(consult_reports) + 分时段(consult_hourly，已补门店名)"""
     period_start, period_end = date(2026, 8, 4), date(2026, 8, 10)
     reports, hourly = [], []
-    fp_z = next(SC.glob("在线咨询数据-2026*.xlsx"), None)
+    fp_z = _latest_file("在线咨询数据-2026*.xlsx")
     if fp_z:
         df = pd.read_excel(fp_z)
         for _, r in df.iterrows():
@@ -251,9 +267,10 @@ def load_consult():
                 "reply5_rate": to_dec3(r.get("5分钟内回复率")), "reply30_rate": to_dec3(r.get("30秒内回复率")),
                 "period_start": period_start, "period_end": period_end,
             })
-    fp_t = SC / "在线咨询_分时段_含门店名.csv"
+    fp_t = _latest_file("分时段咨询数据*.xlsx") or (SC / "在线咨询_分时段_含门店名.csv")
     if fp_t.exists():
-        df = pd.read_csv(fp_t, encoding="utf-8-sig")
+        df = (pd.read_csv(fp_t, encoding="utf-8-sig") if fp_t.suffix.lower() == ".csv"
+              else pd.read_excel(fp_t))
         for _, r in df.iterrows():
             hourly.append({
                 "report_date": parse_date(r.get("日期")),
@@ -263,68 +280,108 @@ def load_consult():
                 "avg_response_sec": to_dec(r.get("平均响应时长（秒）")),
                 "period_start": period_start, "period_end": period_end,
             })
+    period_start, period_end = _period_from_rows(reports + hourly, (period_start, period_end))
+    for row in reports + hourly:
+        row["period_start"], row["period_end"] = period_start, period_end
     return reports, hourly, period_start, period_end
 
 
 # ============================ 入库 ============================
 
-def main():
-    create_db_if_not_exists()
-    engine = get_engine()
-    # 建表（新表：data_snapshots/traffic_reports/traffic_leads/transaction_reports/consult_reports/consult_hourly）
-    from database.models import Base
-    Base.metadata.create_all(engine)
+def _replace_period(session, model, period_start: date, period_end: date) -> None:
+    session.execute(delete(model).where(
+        model.report_date >= period_start,
+        model.report_date <= period_end,
+    ))
+
+
+def _sync_platform_store_ids(session, rows: list[dict]) -> tuple[int, list[str]]:
+    stores = list(session.query(Store).all())
+    mapping, unmatched = build_platform_mapping(rows, stores)
+    by_internal = {int(s.id): s for s in stores}
+    for external_id, internal_id in mapping.items():
+        by_internal[internal_id].platform_store_id = external_id
+    return len(mapping), unmatched
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="经营参谋报表按周期增量入库")
+    parser.add_argument(
+        "--datasets", default="all",
+        help="逗号分隔：campaign,traffic,transaction,consult；默认 all",
+    )
+    args = parser.parse_args(argv)
+    selected = ({"campaign", "traffic", "transaction", "consult"}
+                if args.datasets == "all" else {x.strip() for x in args.datasets.split(",") if x.strip()})
+    invalid = selected - {"campaign", "traffic", "transaction", "consult"}
+    if invalid:
+        parser.error(f"未知数据集: {','.join(sorted(invalid))}")
+
+    init_db()
 
     sf = get_session_factory()
     with sf() as session:
         print("=" * 60)
-        print("【1/4】智选展位 4 维度 → promotion_reports")
-        promo, ps, pe, cs, ce = load_promotion()
-        session.execute(delete(PromotionReport))
-        session.execute(delete(DataSnapshot).where(DataSnapshot.dataset == "campaign"))  # 幂等：删旧快照
-        session.bulk_insert_mappings(PromotionReport, promo)
-        session.add(DataSnapshot(dataset="campaign", period_start=ps, period_end=pe,
-                                 compare_start=cs, compare_end=ce, rows=len(promo),
-                                 source_files="智选展位4维度xls", note="智选展位数据报告(4维度)"))
-        print(f"  ✅ 写入 {len(promo)} 行（time/adv/aud/cre），period {ps}~{pe}，对比 {cs}~{ce}")
+        mapping_rows: list[dict] = []
+        if "campaign" in selected:
+            print("【智选展位】4 维度 → promotion_reports")
+            promo, ps, pe, cs, ce = load_promotion()
+            session.execute(delete(PromotionReport).where(
+                PromotionReport.period_start == ps,
+                PromotionReport.period_end == pe,
+                PromotionReport.store_id.is_(None),
+            ))
+            session.bulk_insert_mappings(PromotionReport, promo)
+            session.add(DataSnapshot(dataset="campaign", period_start=ps, period_end=pe,
+                                     compare_start=cs, compare_end=ce, rows=len(promo),
+                                     source_files="智选展位4维度xls", note="全局推广报表，无门店维度"))
+            print(f"  ✅ 写入 {len(promo)} 行，period {ps}~{pe}")
 
-        print("【2/4】客流分析 → traffic_reports + traffic_leads")
-        traffic, leads, ps2, pe2 = load_traffic()
-        session.execute(delete(TrafficReport))
-        session.execute(delete(TrafficLead))
-        session.execute(delete(DataSnapshot).where(DataSnapshot.dataset == "traffic"))
-        session.bulk_insert_mappings(TrafficReport, traffic)
-        session.bulk_insert_mappings(TrafficLead, leads)
-        session.add(DataSnapshot(dataset="traffic", period_start=ps2, period_end=pe2,
-                                 rows=len(traffic) + len(leads),
-                                 source_files="客流数据/引流用户数据xlsx", note="客流分析-变化趋势+引流用户"))
-        print(f"  ✅ 客流变化 {len(traffic)} 行 + 引流 {len(leads)} 行，period {ps2}~{pe2}")
+        if "traffic" in selected:
+            print("【客流分析】traffic_reports + traffic_leads")
+            traffic, leads, ps2, pe2 = load_traffic()
+            _replace_period(session, TrafficReport, ps2, pe2)
+            _replace_period(session, TrafficLead, ps2, pe2)
+            session.bulk_insert_mappings(TrafficReport, traffic)
+            session.bulk_insert_mappings(TrafficLead, leads)
+            session.add(DataSnapshot(dataset="traffic", period_start=ps2, period_end=pe2,
+                                     rows=len(traffic) + len(leads), source_files="客流数据/引流用户数据xlsx",
+                                     note="按周期覆盖，保留历史"))
+            mapping_rows.extend(traffic + leads)
+            print(f"  ✅ 客流变化 {len(traffic)} 行 + 引流 {len(leads)} 行，period {ps2}~{pe2}")
 
-        print("【3/4】交易分析 → transaction_reports")
-        trans, ps3, pe3 = load_transaction()
-        session.execute(delete(TransactionReport))
-        session.execute(delete(DataSnapshot).where(DataSnapshot.dataset == "transaction"))
-        session.bulk_insert_mappings(TransactionReport, trans)
-        session.add(DataSnapshot(dataset="transaction", period_start=ps3, period_end=pe3,
-                                 rows=len(trans), source_files="商品交易数据(明细)xlsx",
-                                 note="交易分析-商品明细(1434行)"))
-        print(f"  ✅ 写入 {len(trans)} 行，period {ps3}~{pe3}")
+        if "transaction" in selected:
+            print("【交易分析】transaction_reports")
+            trans, ps3, pe3 = load_transaction()
+            _replace_period(session, TransactionReport, ps3, pe3)
+            session.bulk_insert_mappings(TransactionReport, trans)
+            session.add(DataSnapshot(dataset="transaction", period_start=ps3, period_end=pe3,
+                                     rows=len(trans), source_files="商品交易数据(明细)xlsx",
+                                     note="按周期覆盖，保留历史"))
+            mapping_rows.extend(trans)
+            print(f"  ✅ 写入 {len(trans)} 行，period {ps3}~{pe3}")
 
-        print("【4/4】在线咨询 → consult_reports + consult_hourly")
-        cons, hourly, ps4, pe4 = load_consult()
-        session.execute(delete(ConsultReport))
-        session.execute(delete(ConsultHourly))
-        session.execute(delete(DataSnapshot).where(DataSnapshot.dataset == "consult"))
-        session.bulk_insert_mappings(ConsultReport, cons)
-        session.bulk_insert_mappings(ConsultHourly, hourly)
-        session.add(DataSnapshot(dataset="consult", period_start=ps4, period_end=pe4,
-                                 rows=len(cons) + len(hourly),
-                                 source_files="在线咨询数据/分时段咨询数据xlsx",
-                                 note="在线咨询总览+分时段(含门店名)"))
-        print(f"  ✅ 总览 {len(cons)} 行 + 分时段 {len(hourly)} 行，period {ps4}~{pe4}")
+        if "consult" in selected:
+            print("【在线咨询】consult_reports + consult_hourly")
+            cons, hourly, ps4, pe4 = load_consult()
+            _replace_period(session, ConsultReport, ps4, pe4)
+            _replace_period(session, ConsultHourly, ps4, pe4)
+            session.bulk_insert_mappings(ConsultReport, cons)
+            session.bulk_insert_mappings(ConsultHourly, hourly)
+            session.add(DataSnapshot(dataset="consult", period_start=ps4, period_end=pe4,
+                                     rows=len(cons) + len(hourly), source_files="在线咨询数据/分时段咨询数据",
+                                     note="按周期覆盖，保留历史"))
+            mapping_rows.extend(cons + hourly)
+            print(f"  ✅ 总览 {len(cons)} 行 + 分时段 {len(hourly)} 行，period {ps4}~{pe4}")
+
+        if mapping_rows:
+            matched, unmatched = _sync_platform_store_ids(session, mapping_rows)
+            print(f"  ✅ 门店 ID 映射 {matched} 家；未匹配 {len(unmatched)} 家")
+            if unmatched:
+                print("  ⚠️ 未匹配：" + "；".join(unmatched[:5]))
 
         session.commit()
-        print("\n✅ 全部入库完成")
+        print("\n✅ 指定数据集入库完成（历史周期已保留）")
 
 
 if __name__ == "__main__":

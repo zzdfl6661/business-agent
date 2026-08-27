@@ -13,7 +13,15 @@ from datetime import date, datetime, timedelta
 from langchain_core.tools import tool
 from sqlalchemy import func, select
 
-from database.models import Campaign, Order, Product, PromotionReport, Store
+from database.models import (
+    Campaign,
+    DataSnapshot,
+    Order,
+    Product,
+    PromotionReport,
+    Store,
+    TransactionReport,
+)
 from database.mysql import get_session_factory
 from tools.data_cache import get as cache_get
 from tools.data_cache import set as cache_set
@@ -42,6 +50,90 @@ def _daily_dates(start: date, end: date) -> list[dict]:
         out.append({"date": cur.isoformat(), "orders": 0, "gmv": 0.0})
         cur += timedelta(days=1)
     return out
+
+
+def _query_market_sales(store_id: int, days: int) -> dict | None:
+    """订单表为空时，以经营参谋交易报表提供透明标注的线上交易口径。"""
+    try:
+        with get_session_factory()() as session:
+            store = session.execute(select(Store).where(Store.id == store_id)).scalar_one_or_none()
+            if store is None or store.platform_store_id is None:
+                return None
+            snap = session.execute(
+                select(DataSnapshot).where(DataSnapshot.dataset == "transaction").order_by(DataSnapshot.id.desc())
+            ).scalars().first()
+            if not snap or not snap.period_start or not snap.period_end:
+                return None
+            end = snap.period_end
+            start = max(snap.period_start, end - timedelta(days=max(days, 1) - 1))
+            base_filter = (
+                TransactionReport.store_id == store.platform_store_id,
+                TransactionReport.report_date >= start,
+                TransactionReport.report_date <= end,
+            )
+            daily_rows = session.execute(
+                select(
+                    TransactionReport.report_date,
+                    func.coalesce(func.sum(TransactionReport.order_amount), 0).label("gmv"),
+                    func.coalesce(func.sum(TransactionReport.order_coupons), 0).label("orders"),
+                ).where(*base_filter).group_by(TransactionReport.report_date).order_by(TransactionReport.report_date)
+            ).all()
+            if not daily_rows:
+                return None
+            top_rows = session.execute(
+                select(
+                    TransactionReport.product_name,
+                    func.coalesce(func.sum(TransactionReport.order_amount), 0).label("gmv"),
+                    func.coalesce(func.sum(TransactionReport.order_coupons), 0).label("sales_volume"),
+                ).where(*base_filter).group_by(TransactionReport.product_name)
+                .order_by(func.sum(TransactionReport.order_amount).desc()).limit(10)
+            ).all()
+            category_rows = session.execute(
+                select(
+                    TransactionReport.product_type,
+                    func.coalesce(func.sum(TransactionReport.order_amount), 0).label("gmv"),
+                ).where(*base_filter).group_by(TransactionReport.product_type)
+            ).all()
+
+        daily = [{"date": r.report_date.isoformat(), "gmv": round(float(r.gmv or 0), 2),
+                  "orders": int(r.orders or 0)} for r in daily_rows]
+        gmv = sum(r["gmv"] for r in daily)
+        orders = sum(r["orders"] for r in daily)
+        age_days = max((date.today() - end).days, 0)
+        return {
+            "success": True,
+            "data": {
+                "summary": {
+                    "store_id": store_id,
+                    "store_name": store.store_name,
+                    "period": f"{start.isoformat()} ~ {end.isoformat()}",
+                    "gmv": round(gmv, 2),
+                    "order_count": orders,
+                    "avg_order_value": round(gmv / orders, 2) if orders else 0,
+                    "gmv_change_pct": None,
+                    "order_change_pct": None,
+                    "prev_gmv": 0.0,
+                    "prev_order_count": 0,
+                    "data_source": "美团经营参谋-线上交易报表",
+                    "scope_note": "仅代表美团/点评线上下单口径，不等同于门店全部营业额",
+                    "freshness": {"period_end": end.isoformat(), "age_days": age_days, "stale": age_days > 8},
+                },
+                "daily": daily,
+                "prev_daily": [],
+                "top_products": [
+                    {"product_name": r.product_name, "gmv": round(float(r.gmv or 0), 2),
+                     "sales_volume": int(r.sales_volume or 0)} for r in top_rows
+                ],
+                "category_breakdown": [
+                    {"category": r.product_type or "未知", "gmv": round(float(r.gmv or 0), 2)}
+                    for r in category_rows
+                ],
+            },
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("经营参谋交易数据兜底失败：%s", exc)
+        return None
 
 
 def _query_daily(store_id: int, start: date, end: date) -> list[dict]:
@@ -175,8 +267,13 @@ def get_sales_data(
     prev_daily = _query_daily(store_id or 1, prev_start, prev_end)
     top_products = _query_top_products(store_id or 1, start, end)
     category_breakdown = _query_category(store_id or 1, start, end)
-    if not daily:
-        return {"success": False, "data": {}, "error": "未查询到数据：请确认数据库已初始化并运行种子脚本/导入真实订单"}
+    if not daily or not any((d.get("orders", 0) or d.get("gmv", 0)) for d in daily):
+        fallback = _query_market_sales(store_id or 1, days)
+        if fallback:
+            cache_set("get_sales_data", params, fallback)
+            return fallback
+        if not daily:
+            return {"success": False, "data": {}, "error": "未查询到门店订单或经营参谋交易数据"}
 
     cur_gmv = sum(d["gmv"] for d in daily)
     cur_orders = sum(d["orders"] for d in daily)
@@ -261,6 +358,24 @@ def get_store_sales_ranking(
             }
             for r in rows
         ]
+        if not stores:
+            # POS/订单明细尚未接入时，使用经营参谋线上交易排名并明确标注口径。
+            from tools.market_data_tool import get_transaction_data
+
+            online = get_transaction_data.invoke({"days": params["days"], "rank": True})
+            if online.get("success"):
+                online_data = online.get("data", {})
+                stores = [
+                    {
+                        "store_id": s.get("store_id"),
+                        "store_name": s.get("store_name"),
+                        "sales_volume": int(s.get("order_coupons", 0) or 0),
+                        "order_count": int(s.get("order_coupons", 0) or 0),
+                        "gmv": round(float(s.get("order_amount", 0) or 0), 2),
+                    }
+                    for s in online_data.get("stores", []) if s.get("store_id") is not None
+                ]
+                start, end = (date.fromisoformat(x.strip()) for x in online_data["period"].split("~"))
         stores.sort(key=lambda item: item[metric], reverse=True)
         for rank, item in enumerate(stores, 1):
             item["rank"] = rank
@@ -271,7 +386,8 @@ def get_store_sales_ranking(
                 "metric": metric,
                 "stores": stores[:params["top_n"]],
                 "total_stores": len(stores),
-                "data_source": "MySQL",
+                "data_source": "MySQL orders" if rows else "美团经营参谋-线上交易报表",
+                "scope_note": None if rows else "线上下单排名，不等同于门店全部营业额排名",
             },
             "error": None,
         }
@@ -282,7 +398,7 @@ def get_store_sales_ranking(
     return result
 
 
-def _query_real_campaigns(days: int = 30) -> dict:
+def _query_real_campaigns(store_id: int | None = None, days: int = 30) -> dict:
     """
     读取真实推广数据（promotion_reports，智选展位下载）。
     按推广名称聚合 adv 维度；返回 {found, campaigns, total_spent, aov, period}。
@@ -290,11 +406,28 @@ def _query_real_campaigns(days: int = 30) -> dict:
     """
     try:
         with get_session_factory()() as session:
+            snap = session.execute(
+                select(DataSnapshot).where(DataSnapshot.dataset == "campaign").order_by(DataSnapshot.id.desc())
+            ).scalars().first()
+            scope_filters = []
+            if snap and snap.period_start and snap.period_end:
+                scope_filters.extend((
+                    PromotionReport.period_start == snap.period_start,
+                    PromotionReport.period_end == snap.period_end,
+                ))
+            if store_id is not None:
+                scope_filters.append(PromotionReport.store_id == store_id)
+            else:
+                scope_filters.append(PromotionReport.store_id.is_(None))
             exists = session.execute(
-                select(func.count()).select_from(PromotionReport)
+                select(func.count()).select_from(PromotionReport).where(*scope_filters)
             ).scalar()
             if not exists:
-                return {"found": False, "campaigns": [], "total_spent": 0.0, "aov": 0.0, "period": None}
+                global_exists = session.execute(
+                    select(func.count()).select_from(PromotionReport).where(PromotionReport.store_id.is_(None))
+                ).scalar()
+                return {"found": False, "scope_error": bool(store_id and global_exists), "campaigns": [],
+                        "total_spent": 0.0, "aov": 0.0, "period": None}
 
             rows = session.execute(
                 select(
@@ -308,7 +441,7 @@ def _query_real_campaigns(days: int = 30) -> dict:
                     func.min(PromotionReport.period_start).label("p_start"),
                     func.max(PromotionReport.period_end).label("p_end"),
                 )
-                .where(PromotionReport.dimension == "adv")
+                .where(PromotionReport.dimension == "adv", *scope_filters)
                 .group_by(PromotionReport.name)
                 .order_by(func.sum(PromotionReport.spent).desc())
             ).all()
@@ -317,6 +450,7 @@ def _query_real_campaigns(days: int = 30) -> dict:
             aov_row = session.execute(
                 select(func.sum(Order.total_amount) / func.count())
                 .where(
+                    Order.store_id == store_id if store_id is not None else True,
                     Order.order_time >= datetime.combine(date.today() - timedelta(days=days), datetime.min.time()),
                     Order.order_status == "completed",
                 )
@@ -347,6 +481,7 @@ def _query_real_campaigns(days: int = 30) -> dict:
         period = campaigns[0].get("period") if campaigns else None
         return {
             "found": True,
+            "scope": "store" if store_id is not None else "global",
             "campaigns": campaigns,
             "total_spent": round(sum(c["spent"] for c in campaigns), 2),
             "aov": round(aov, 2),
@@ -364,7 +499,7 @@ def _query_campaign_data(
 ) -> dict:
     """读取推广数据（真实逻辑，供 get_campaign_data 缓存包装调用）。"""
     # 优先真实推广报告（promotion_reports）
-    real = _query_real_campaigns(days=days)
+    real = _query_real_campaigns(store_id=store_id, days=days)
     if real["found"]:
         data = {
             "store_id": store_id or 1,
@@ -374,8 +509,15 @@ def _query_campaign_data(
             "period": real["period"],
             "aov": real["aov"],
             "note": "数据来源：美团经营宝智选展位数据报告（真实下载数据）",
+            "scope": real.get("scope"),
         }
         return {"success": True, "data": data, "error": None}
+    if real.get("scope_error"):
+        return {
+            "success": False,
+            "data": {},
+            "error": "当前推广报表只有全局汇总、没有门店维度，不能用于该门店的推广结论；请采集按门店报表",
+        }
 
     try:
         with get_session_factory()() as session:
