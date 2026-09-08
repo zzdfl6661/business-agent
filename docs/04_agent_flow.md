@@ -28,7 +28,7 @@ class AgentState(TypedDict, total=False):
                 ┌──────────────────────────────────────────┐
                 │                                          │
                 ▼                                          │(有 tool_calls → 回环)
-   START ──▶ intent ──(route_after_intent)─────────────▶ tools(ToolNode)
+   START ──▶ intent ──(route_after_intent)─────────────▶ tools(自定义执行器)
                │                                         │
                │(无 tool_calls)                          │
                ▼                                         │
@@ -37,8 +37,8 @@ class AgentState(TypedDict, total=False):
 
 | 节点 | 职责 | 实现要点 |
 |---|---|---|
-| **intent** | 意图分析 | `llm.bind_tools([5 个工具])` 生成 AI 消息；从问题中解析 `store_id / days / start_date` 等参数注入 system prompt；当 LLM 请求工具时产出 tool_calls |
-| **tools** | 工具执行 | `ToolNode(ALL_TOOLS)`，执行后结果作为 ToolMessage 回写 messages |
+| **intent** | 意图分析 | 常规指标生成确定性 `tool_plan`；日期等复杂参数才由 `llm.bind_tools` 决策，最多 3 轮 |
+| **tools** | 工具执行 | 自定义执行器；完整结果写入 `query_result`，LLM 观察路径仅回写限长 ToolMessage |
 | **analysis** | 数据分析 | 确定性调用 `analysis_business_data`（Pandas），不经过 LLM，保证指标计算准确 |
 | **rag** | 知识检索 | 以问题 + 分析结论为 query 调用 `search_operation_knowledge`，检索运营知识库 |
 | **report** | 报告生成 | LLM 综合 query_result + analysis_result + retrieval_docs，生成结构化 markdown 经营诊断报告 |
@@ -51,7 +51,8 @@ def route_after_intent(state: AgentState) -> str:
     return "tools" if getattr(last, "tool_calls", None) else "analysis"
 ```
 
-- LLM 请求工具 → 进 tools 执行，执行完**回环到 intent**（ReAct 循环，直到 LLM 认为数据齐备）
+- 常规指标问题先生成确定性工具计划，一批执行后进入分析；避免为固定查询额外消耗一次 LLM。
+- 显式日期等规则无法安全解析的请求进入受限 ReAct：工具结果会回传给 LLM，最多 `BIZ_AGENT_MAX_TOOL_ROUNDS` 轮；无更多调用或达到上限后进入分析。
 - LLM 不再请求工具 → 进入确定性分析链路 analysis → rag → report
 
 ## 4. 节点函数签名（agent/nodes.py）
@@ -82,7 +83,13 @@ def report_node(state: AgentState) -> dict:
 
 两条路径共享同一实现，互不冲突，后续演进为多 Agent 时无需改动工具层。
 
-## 6. System Prompt 设计（intent / report 节点）
+## 6. 会话上下文与记忆
+
+- `chat_messages` 保存每一条完整原始消息，摘要和上下文裁剪不删除原文；`chat_sessions.history` 仅为旧客户端保留短窗口兼容。
+- `session_memories` 保存可版本化的结构化摘要（当前目标、实体、已确认事实、决定、待办、用户纠正），仅覆盖较早消息。
+- 每次请求注入“结构化摘要 + token 预算内最近原文”；预算和压缩阈值由 `BIZ_CONVERSATION_*` 配置控制。摘要失败时不推进覆盖位置，原文仍可在后续重试中使用。
+
+## 7. System Prompt 设计（intent / report 节点）
 
 ```python
 INTENT_SYSTEM_PROMPT = """你是连锁门店经营分析助手。根据用户问题决定需要查询哪些数据。
@@ -102,7 +109,7 @@ summary(结论摘要 2-3 条) / metrics(关键指标 3-4 条) / factors(原因�
 > data 链路使用 `with_structured_output(ReportSections)` 结构化输出（#14），前端直接渲染五段卡片；
 > kb 链路保持口语化 markdown（流式逐 token）。
 
-## 7. Supervisor 多 Agent 路由（已上线）
+## 8. Supervisor 多 Agent 路由（已上线）
 
 ```text
 Supervisor（确定性路由，agent/routing.py::resolve_intent）

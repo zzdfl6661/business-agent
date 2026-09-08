@@ -18,8 +18,15 @@ from starlette.concurrency import run_in_threadpool
 
 from agent.graph import agent
 from config.logging_setup import audit
+from config.settings import settings
 from database.mysql import get_session_factory
-from database.models import ChatSession
+from database.models import ChatMessage, ChatSession, SessionMemory
+from services.conversation_memory import (
+    build_model_context,
+    normalize_memory,
+    should_compact,
+    summarize_memory,
+)
 from rag import loader
 from sqlalchemy import select
 
@@ -49,17 +56,17 @@ router = APIRouter(prefix="/api", tags=["chat"])
 # 数据采集全局并发锁：刷新涉及 Edge 重启/注入/下载，同一时刻只允许一个任务
 _refresh_lock = asyncio.Lock()
 
-# 多轮对话：前端只传最近 N 轮，控制上下文体积（token 优化）
+# 兼容旧 ``chat_sessions.history`` 字段的窗口；模型上下文改由 token 预算构建。
 MAX_HISTORY_TURNS = 6
 
 
 class HistoryItem(BaseModel):
     role: str = Field(..., pattern="^(user|assistant)$")
-    content: str = Field(..., max_length=4000)
+    content: str = Field(..., max_length=16000)
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000, description="自然语言经营分析问题")
+    question: str = Field(..., min_length=1, max_length=8000, description="自然语言经营分析问题")
     store_id: int | None = Field(None, description="可选：指定门店 ID（1~5）")
     history: list[HistoryItem] = Field(default_factory=list, description="历史对话（兼容旧前端；新前端用 session_id）")
     session_id: str | None = Field(None, max_length=64, description="会话 ID（持久化对话上下文）")
@@ -95,49 +102,132 @@ def _sum_usage(result: dict) -> dict:
     return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": input_tokens + output_tokens}
 
 
-# ============ 会话持久化（轻量记忆，非 LangGraph checkpoint） ============
+# ============ 会话持久化与结构化上下文 ============
 
-def _load_session_history(session_id: str | None, req_history: list) -> list[dict]:
-    """加载会话历史：优先 session_id 存储，否则用请求 history（兼容）。"""
+def _legacy_history(row: ChatSession | None) -> list[dict]:
+    if not row or not row.history:
+        return []
+    try:
+        value = json.loads(row.history)
+        return value if isinstance(value, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+def _load_session_context(session_id: str | None, req_history: list) -> tuple[list[dict], dict, list]:
+    """加载完整原文，并构造预算内的模型上下文；摘要永不取代原文存档。"""
+    raw_messages = [{"sequence": i + 1, "role": h.role, "content": h.content}
+                    for i, h in enumerate(req_history)]
+    memory: dict = {}
     if session_id:
         try:
             with get_session_factory()() as session:
-                row = session.execute(
+                rows = session.execute(
+                    select(ChatMessage).where(ChatMessage.session_id == session_id)
+                    .order_by(ChatMessage.sequence.asc())
+                ).scalars().all()
+                legacy = session.execute(
                     select(ChatSession).where(ChatSession.session_id == session_id)
                 ).scalars().first()
-            if row and row.history:
-                hist = json.loads(row.history)
-                if isinstance(hist, list):
-                    return hist[-MAX_HISTORY_TURNS * 2:]
+                memory_row = session.execute(
+                    select(SessionMemory).where(SessionMemory.session_id == session_id)
+                ).scalars().first()
+            if rows:
+                raw_messages = [{"sequence": r.sequence, "role": r.role, "content": r.content}
+                                for r in rows]
+            else:
+                raw_messages = [{"sequence": i + 1, "role": item.get("role", "user"),
+                                 "content": str(item.get("content", ""))}
+                                for i, item in enumerate(_legacy_history(legacy))]
+            memory = normalize_memory(memory_row.memory if memory_row else {}, settings.conversation_memory_max_chars)
         except Exception as exc:  # noqa: BLE001
             logger.warning("加载会话 %s 失败：%s", session_id, exc)
-    return [{"role": h.role, "content": h.content} for h in req_history]
+    context = build_model_context(
+        raw_messages, memory,
+        token_budget=settings.conversation_context_token_budget,
+        recent_turns=settings.conversation_recent_turns,
+        memory_max_chars=settings.conversation_memory_max_chars,
+    )
+    return raw_messages, memory, context
+
+
+def _compact_session_memory(session_id: str) -> None:
+    """对较早原文做增量摘要。失败不推进覆盖位置，因此下次可安全重试。"""
+    try:
+        with get_session_factory()() as session:
+            rows = session.execute(
+                select(ChatMessage).where(ChatMessage.session_id == session_id)
+                .order_by(ChatMessage.sequence.asc())
+            ).scalars().all()
+            memory_row = session.execute(
+                select(SessionMemory).where(SessionMemory.session_id == session_id)
+            ).scalars().first()
+            raw = [{"sequence": r.sequence, "role": r.role, "content": r.content} for r in rows]
+            existing = normalize_memory(memory_row.memory if memory_row else {}, settings.conversation_memory_max_chars)
+            covered = memory_row.covered_through_sequence if memory_row else 0
+        to_compact = should_compact(
+            raw, covered,
+            threshold_tokens=settings.conversation_compact_threshold_tokens,
+            recent_turns=settings.conversation_recent_turns,
+        )
+        if not to_compact:
+            return
+        updated = summarize_memory(existing, to_compact, max_chars=settings.conversation_memory_max_chars)
+        if updated is None:
+            logger.warning("会话 %s 摘要失败，保留原文并将在后续轮次重试", session_id)
+            return
+        with get_session_factory()() as session:
+            memory_row = session.execute(
+                select(SessionMemory).where(SessionMemory.session_id == session_id)
+            ).scalars().first()
+            if memory_row:
+                memory_row.memory = json.dumps(updated, ensure_ascii=False)
+                memory_row.covered_through_sequence = int(to_compact[-1]["sequence"])
+                memory_row.version += 1
+            else:
+                session.add(SessionMemory(
+                    session_id=session_id, memory=json.dumps(updated, ensure_ascii=False),
+                    covered_through_sequence=int(to_compact[-1]["sequence"]), version=1,
+                ))
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("压缩会话 %s 失败：%s", session_id, exc)
 
 
 def _save_session_history(session_id: str, history: list[dict], report: str, question: str) -> None:
-    """追加本轮问答并持久化（裁剪窗口控制体积）。"""
+    """完整追加原始问答；旧 history 字段仅保留兼容窗口，绝非历史唯一来源。"""
     if not session_id:
         return
     try:
-        history.append({"role": "user", "content": question})
-        history.append({"role": "assistant", "content": report[:4000]})
-        history = history[-MAX_HISTORY_TURNS * 2:]
         with get_session_factory()() as session:
-            row = session.execute(
-                select(ChatSession).where(ChatSession.session_id == session_id)
-            ).scalars().first()
-            if row:
-                row.history = json.dumps(history, ensure_ascii=False)
-                row.last_question = question[:500]
-                row.message_count = len(history)
+            row = session.execute(select(ChatSession).where(ChatSession.session_id == session_id)).scalars().first()
+            existing = session.execute(
+                select(ChatMessage).where(ChatMessage.session_id == session_id)
+                .order_by(ChatMessage.sequence.asc())
+            ).scalars().all()
+            # 首次升级时，把旧短窗口迁入原始消息表，之后所有新消息都完整保存。
+            if not existing:
+                for index, item in enumerate(history, start=1):
+                    session.add(ChatMessage(session_id=session_id, sequence=index,
+                                            role=item.get("role", "user"), content=str(item.get("content", ""))))
+                next_sequence = len(history) + 1
             else:
-                session.add(ChatSession(
-                    session_id=session_id,
-                    history=json.dumps(history, ensure_ascii=False),
-                    last_question=question[:500],
-                    message_count=len(history),
-                ))
+                next_sequence = int(existing[-1].sequence) + 1
+            session.add_all([
+                ChatMessage(session_id=session_id, sequence=next_sequence, role="user", content=question),
+                ChatMessage(session_id=session_id, sequence=next_sequence + 1, role="assistant", content=report),
+            ])
+            legacy = [*history, {"role": "user", "content": question},
+                      {"role": "assistant", "content": report[:4000]}][-MAX_HISTORY_TURNS * 2:]
+            if row:
+                row.history = json.dumps(legacy, ensure_ascii=False)
+                row.last_question = question[:500]
+                row.message_count = next_sequence + 1
+            else:
+                session.add(ChatSession(session_id=session_id, history=json.dumps(legacy, ensure_ascii=False),
+                                        last_question=question[:500], message_count=next_sequence + 1))
             session.commit()
+        _compact_session_memory(session_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("保存会话 %s 失败：%s", session_id, exc)
 
@@ -191,6 +281,9 @@ def delete_session(session_id: str) -> dict:
             ).scalars().first()
             if not row:
                 return {"success": False, "error": "会话不存在"}
+            for model in (ChatMessage, SessionMemory):
+                for related in session.execute(select(model).where(model.session_id == session_id)).scalars().all():
+                    session.delete(related)
             session.delete(row)
             session.commit()
         audit("session_delete", session_id)
@@ -208,14 +301,14 @@ def get_session_messages(session_id: str) -> dict:
             row = session.execute(
                 select(ChatSession).where(ChatSession.session_id == session_id)
             ).scalars().first()
+            raw_rows = session.execute(
+                select(ChatMessage).where(ChatMessage.session_id == session_id)
+                .order_by(ChatMessage.sequence.asc())
+            ).scalars().all()
         if not row:
             return {"success": False, "error": "会话不存在"}
-        try:
-            messages = json.loads(row.history) if row.history else []
-        except (TypeError, ValueError):
-            messages = []
-        if not isinstance(messages, list):
-            messages = []
+        messages = ([{"role": item.role, "content": item.content} for item in raw_rows]
+                    if raw_rows else _legacy_history(row))
         return {
             "success": True,
             "session_id": session_id,
@@ -290,19 +383,16 @@ async def chat(req: ChatRequest) -> ChatResponse:
         question = f"{question}\n（目标门店：{req.store_id}）"
 
     # 历史消息：优先 session 存储（持久化记忆），兼容请求 history
-    hist = _load_session_history(req.session_id, req.history)
+    hist, session_memory, messages = _load_session_context(req.session_id, req.history)
     from langchain_core.messages import AIMessage, HumanMessage
 
-    messages: list[Any] = []
-    for item in hist:
-        msg = HumanMessage(content=item["content"]) if item["role"] == "user" else AIMessage(content=item["content"])
-        messages.append(msg)
     messages.append(HumanMessage(content=question))
 
     t0 = time.time()
 
     def _run() -> dict:
-        return agent.invoke({"user_question": question, "messages": messages, "session_id": req.session_id or ""})
+        return agent.invoke({"user_question": question, "messages": messages,
+                             "session_id": req.session_id or "", "session_memory": session_memory})
 
     result = await run_in_threadpool(_run)
     report = result.get("final_report", "（报告生成失败，请查看日志）")
@@ -418,13 +508,10 @@ async def chat_stream(req: ChatRequest):
     from langchain_core.messages import AIMessage, HumanMessage
 
     # 会话持久化历史（优先 session_id）
-    hist = _load_session_history(req.session_id, req.history)
-    messages: list[Any] = []
-    for item in hist:
-        msg = HumanMessage(content=item["content"]) if item["role"] == "user" else AIMessage(content=item["content"])
-        messages.append(msg)
+    hist, session_memory, messages = _load_session_context(req.session_id, req.history)
     messages.append(HumanMessage(content=question))
-    inputs = {"user_question": question, "messages": messages, "session_id": req.session_id or ""}
+    inputs = {"user_question": question, "messages": messages,
+              "session_id": req.session_id or "", "session_memory": session_memory}
 
     def sse(event: str, data: str) -> str:
         return f"event: {event}\ndata: {data}\n\n"

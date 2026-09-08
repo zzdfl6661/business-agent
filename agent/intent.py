@@ -58,10 +58,15 @@ def _rule_decision(question: str) -> IntentDecision:
 
 
 def classify_intent(question: str) -> IntentDecision:
-    """返回可组合意图；未知问题按既有默认策略走知识问答。"""
+    """返回可组合意图；规则处理高确定性场景，冲突/未知表达交给受限 LLM 分类。"""
     decision = _rule_decision(question)
-    # 原项目的关键词规则是主路径。只有低置信自由表达才调用 LLM，失败仍安全回退。
-    if not settings.intent_llm_fallback or decision.confidence >= 0.8 or not (question or "").strip():
+    q = (question or "").lower()
+    data_hit = _has_any(q, DATA_KEYS)
+    knowledge_hit = _has_any(q, KNOWLEDGE_KEYS)
+    # 两类词同时命中时，规则仍给出知识优先的安全回退，但交给分类器复核，避免
+    # “绩效数据趋势”一类复合问题被静默地误路由。
+    ambiguous = decision.confidence < 0.8 or (data_hit and knowledge_hit)
+    if not settings.intent_llm_fallback or not ambiguous or not q.strip():
         return decision
     try:
         from config.llm_factory import create_llm

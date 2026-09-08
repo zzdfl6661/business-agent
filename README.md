@@ -1,11 +1,11 @@
 # 企业经营智能决策与店长通知 Agent 系统
 
 > Enterprise Intelligent Decision & Notification Agent — 面向连锁门店的低风险运营闭环
-> **数据获取 → 智能分析 → 知识问答 → 问题诊断 → 店长沟通草稿 → 人工确认 → dry-run 或钉钉单聊**
+> **授权数据获取 / 报表导入 → 智能分析 → 知识问答 → 问题诊断 → 店长沟通草稿 → 人工确认 → dry-run 或钉钉单聊**
 
 用户只需用自然语言提问，系统自动完成完整闭环。系统具备三类能力：
 
-- 📊 **经营数据分析**：理解意图 → 查询业务数据（MySQL）→ Pandas 指标计算 → 异常归因 → 检索运营知识库 → 生成经营诊断报告
+- 📊 **经营数据分析**：理解意图 → 查询业务数据（MySQL）→ Pandas 指标计算 → 异常归因 → 检索运营知识库 → 生成经营诊断报告；实时刷新需要公司授权登录态，离线报表可经导入链路入库
 - 📖 **企业内部知识问答**：直接检索知识库（制度/手册/话术/流程）→ 口语化回答
 - 💬 **店长通知授权**：仅在用户明确要求时生成可追溯的纯文本沟通草稿；人工确认后默认 dry-run，也可通过 Windows 宿主机已登录的 DWS 以个人身份发钉钉单聊。不修改推广预算。
 
@@ -37,6 +37,8 @@ http://localhost/sessions     # 历史会话与上下文恢复
 > Collector 监听 `127.0.0.1:8001`，主服务会自动转发“数据采集”按钮请求；Docker MySQL 仅映射到
 > `127.0.0.1:3307`，不暴露给局域网。
 
+> 数据采集的授权边界：在线采集只应使用公司授权的商家后台账号或服务账号。若没有有效授权，应关闭刷新功能，保留数据库中的历史快照，或由数据负责人提供正式导出的报表文件后导入；项目不提供绕过登录、复用离职账号或转移 Cookie 的方案。
+
 ---
 
 ## 一、核心特性
@@ -55,6 +57,8 @@ http://localhost/sessions     # 历史会话与上下文恢复
 | **查询缓存** | 昂贵数据工具 TTL 缓存（60s），`/api/workflow/refresh` 与执行确认后自动失效 |
 | **LLM 运行时切换** | 前端下拉即可切换 DeepSeek/CodeBuddy/OpenAI/本地（`POST /api/llm/switch`），无需改 .env 重启 |
 | **会话持久化** | 按 session_id 存储对话历史，刷新不丢上下文；支持删除会话、导出对话 |
+| **分层会话记忆** | 原始消息追加存储；结构化摘要保存目标、实体、事实、决定与待办；按 token 预算注入摘要和相关原文，摘要失败不丢原文 |
+| **混合工具编排** | 高频指标用确定性查询计划；复杂日期/参数使用受限 ReAct，最多 3 轮工具观察与调用，避免无限循环 |
 | **低风险通知闭环** | `AnalysisRun` 保存分析快照；店长通讯录一次性直接导入 `store_contacts`，草稿可编辑、确认、取消，默认 dry-run 且幂等 |
 | **钉钉发送边界** | 默认 disabled/dry-run；个人账号 live 走 Windows 宿主机的 DWS CLI，固定收件人并经过人工确认；官方 MCP Python SDK 客户端作为可选适配层，未配置时不建立连接 |
 | **可观测性** | request_id 贯穿日志/审计/前端 trace；`GET /api/audit` 只读查询（时间/事件/会话过滤）；错误信息脱敏 |
@@ -103,7 +107,7 @@ curl http://127.0.0.1:8000/health
 .venv/Scripts/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-**当前状态**：仅真实数据链路——已接入真实 MySQL（`business_agent` 库，37 家密室逃脱真实门店 + 23.3 万订单 + 128 条推广计划 + 客流/交易/咨询市场数据）。**不提供任何 Mock/模拟数据**：LLM 通道未配置时接口会返回明确错误，请先配置 `BIZ_LLM_PROVIDER` 对应通道。
+**当前状态**：分析链路基于 MySQL 中已导入的数据快照运行；实时采集是可选的授权能力，不是部署后的默认前提。没有公司授权时，应使用历史快照或经授权导入的报表，不能把结果标注为实时数据。**不提供任何 Mock/模拟数据**：LLM 通道未配置时接口会返回明确错误，请先配置 `BIZ_LLM_PROVIDER` 对应通道。
 
 ---
 
@@ -265,15 +269,27 @@ cnb.cool 的 `codebuddy-proxy`（Docker 部署，`http://127.0.0.1:19090/v1`）*
 - 个人 DWS live 需要在 Windows 宿主机登录 DWS，并将 `BIZ_DINGTALK_DWS_COMMAND` 配置为原生 `dws.exe` 的路径，不能配置 `dws.cmd`；同时填写朱兴福的 `userId` 和 `openDingTalkId`。Docker 主服务通过 `127.0.0.1:8001` Collector 转发，收件人始终由配置锁定。
 - DWS 的发送参数使用 `--content` 和 `--idempotency-key`。原生 `dws.exe` 能保留多行正文，Windows 的 `dws.cmd` 包装器可能在转发时截断换行。
 
-### 5.3 意图路由（默认 RAG，统一判定）
+### 5.3 意图路由（规则快路径 + LLM 歧义复核）
 
-- 判定集中在 `agent/routing.py::resolve_intent`（**supervisor 与 report 共用**，消除不一致）：
+- 判定集中在 `agent/routing.py` 与 `agent/intent.py`：
   1. 命中知识词（制度/手册/话术/报销/绩效…）→ **kb**（知识词优先，解决"报销流程数据"同时命中知识词与数据词的冲突）；
   2. 否则命中数据词（营业额/订单/环比/推广/客流/排名…）→ **data**；
   3. 未命中 → **kb**（默认 RAG，避免答非所问）。
-- 确定性关键词匹配，不依赖 LLM 发挥；门店名自动解析为 store_id（`tools/store_resolver.py`）。
+- 关键词命中明确时直接路由；未命中、或知识词与数据词同时命中时，使用当前激活的 LLM 按 `IntentDecision` schema 复核。LLM 失败时回退规则结果；门店名仍由 `tools/store_resolver.py` 确定性解析为 store_id。
 
-### 5.4 工具清单（8 个，`tools/ALL_TOOLS`）
+### 5.4 会话记忆与上下文预算
+
+```text
+完整原始消息（chat_messages，追加保存）
+  → 结构化会话记忆（session_memories，增量摘要）
+  → 每次调用：摘要 + token 预算内原文 + 当前问题
+```
+
+- 结构化记忆包括当前目标、门店/时间/指标等实体、带来源的确认事实、决定、待办和用户纠正。
+- 近期原文优先保留；较早消息在达到阈值后压缩。摘要失败不覆盖旧摘要、不删除原文。
+- `BIZ_CONVERSATION_RECENT_TURNS`、`BIZ_CONVERSATION_CONTEXT_TOKEN_BUDGET`、`BIZ_CONVERSATION_COMPACT_THRESHOLD_TOKENS`、`BIZ_CONVERSATION_MEMORY_MAX_CHARS` 用于控制上下文成本。预算是会话部分的保守估算，报告节点仍会附加经过裁剪的业务数据与 RAG 证据。
+
+### 5.5 工具清单（8 个，`tools/ALL_TOOLS`）
 
 | 工具 | 职责 | 数据源 |
 |---|---|---|
@@ -288,12 +304,13 @@ cnb.cool 的 `codebuddy-proxy`（Docker 部署，`http://127.0.0.1:19090/v1`）*
 
 > 数据采集（`refresh_market_data`）不注册为 LLM 工具——改为**前端按钮驱动**（`/api/workflow/refresh`），避免对话触发的高成本与不可控。推广预算修改能力已完全下线。
 
-### 5.5 请求链路（数据类为例）
+### 5.6 请求链路（数据类为例）
 
 ```
 FastAPI(/api/chat/stream)
   → Supervisor 路由
-  → 经营分析 Agent: intent(LLM 选工具) → get_sales_data/get_campaign_data → tools_node(完整结果入 state.query_result)
+  → 经营分析 Agent: intent(常规问题生成确定性 tool_plan；复杂日期/参数才由 LLM 选工具)
+  → tools_node(完整结果入 state.query_result；ReAct 最多 3 轮)
   → analysis(analysis_business_data, Pandas 计算指标+归因)
   → rag(知识层纯问题检索 + 经验层带分析结论检索)
   → report(LLM 生成五段卡片报告)
@@ -404,6 +421,8 @@ Business Agent/                    # 项目根目录（全部代码在根目录�
 | | `BIZ_CODEBUDDY_BASE_URL` / `BIZ_CODEBUDDY_MODEL` | workbuddy2api 本地代理，`8788`=远程账号 ｜ `8787`=本机账号 |
 | | `BIZ_LOCAL_BASE_URL` / `BIZ_LOCAL_MODEL` | 本地 OpenAI 兼容端点（Ollama/vLLM） |
 | | `BIZ_LLM_TEMPERATURE` | 生成温度，默认 `0.3` |
+| **会话与 Agent** | `BIZ_CONVERSATION_*` | 最近原文轮数、上下文 token 预算、摘要阈值和摘要最大字符数；原始消息不因摘要删除 |
+| | `BIZ_AGENT_MAX_TOOL_ROUNDS` | 复杂工具调用的硬上限，默认 `3`；常规指标查询走确定性计划，不进入 ReAct |
 | **MySQL** | `BIZ_DB_HOST/PORT/USER/PASSWORD/NAME` | 业务库（`business_agent`）；`BIZ_STORES_JSON`=门店主数据 JSON 路径 |
 | **RAG** | `BIZ_VECTOR_STORE_TYPE` | `chroma` / `milvus` |
 | | `BIZ_CHROMA_DIR` | 向量库目录，默认 `./chroma_db` |
