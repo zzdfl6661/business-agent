@@ -338,6 +338,39 @@ class ChatSession(TimestampMixin, Base):
     message_count: Mapped[int] = mapped_column(default=0)
 
 
+class ChatMessage(TimestampMixin, Base):
+    """会话的不可变原始消息日志。
+
+    ``ChatSession.history`` 只保留给旧客户端兼容的短窗口；该表才是完整对话的
+    source of truth。摘要或上下文裁剪绝不能删除这里的记录。
+    """
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        Index("ix_chat_message_session_sequence", "session_id", "sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # user / assistant
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 预留给图片、文件、工具来源等；当前客户端仍只传文本，不能把 Base64 塞进 content。
+    attachments: Mapped[str | None] = mapped_column(Text)
+
+
+class SessionMemory(TimestampMixin, Base):
+    """可版本化的结构化会话记忆，覆盖 ``covered_through_sequence`` 之前的消息。"""
+
+    __tablename__ = "session_memories"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    memory: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    covered_through_sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    version: Mapped[int] = mapped_column(default=0, nullable=False)
+
+
 class AnalysisRun(TimestampMixin, Base):
     """可复用的结构化经营分析快照，供同会话通知追问读取。"""
 

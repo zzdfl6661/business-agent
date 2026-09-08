@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     codebuddy_api_key: str = ""               # workbuddy2api 默认不校验，留空即可
     llm_temperature: float = 0.3
 
+    # ---------- 会话记忆 / 上下文 ----------
+    # 原始消息完整落库；这些值只控制每次发给模型的工作上下文，不能作为删历史的依据。
+    conversation_recent_turns: int = 4
+    conversation_context_token_budget: int = 6000
+    conversation_compact_threshold_tokens: int = 4500
+    conversation_memory_max_chars: int = 3000
+    agent_max_tool_rounds: int = 3
+
     # ---------- MySQL ----------
     db_host: str = "127.0.0.1"
     db_port: int = 3306

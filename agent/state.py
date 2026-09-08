@@ -27,8 +27,12 @@ class AgentState(TypedDict, total=False):
     store_id: int | None      # #6 门店解析结果（"XX店" → store_id，供 intent/analysis/经验层检索）
     query_result: dict
     tool_plan: list[dict]    # 确定性数据查询计划；普通数据问答不再消耗一次 LLM 工具决策
+    tool_mode: str           # deterministic / react；只有 react 允许观察工具结果后继续决策
+    tool_round: int
     analysis_result: dict
     retrieval_docs: list
+    query_plan: dict          # Query Rewrite / HyDE 决策与实体、数值、时间保留明细
+    retrieval_trace: dict    # 候选数量、reranker 实际状态等轻量可观测信息
     pending_plans: list       # 旧字段兼容，始终为空
     analysis_run_id: str
     analysis_run: dict        # 持久化后的结构化分析快照
@@ -39,5 +43,6 @@ class AgentState(TypedDict, total=False):
     pending_notifications: list[dict]
     clarification: str
     session_id: str
+    session_memory: dict    # 已压缩的结构化历史：目标、事实、决策、待办；不是原始消息替代品
     final_report: str
     report_sections: dict     # #14 结构化五段报告（summary/metrics/factors/actions/risks；kb 链路无）
