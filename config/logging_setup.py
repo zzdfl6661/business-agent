@@ -89,12 +89,15 @@ def audit(event_type: str, session_id: str | None = None, **detail) -> None:
 
     #8：自动携带 request_id（contextvars），审计可按 request 串联。
     """
-    from config.request_id import get_request_id
+    from config.request_id import get_operator_id, get_request_id
 
     rid = get_request_id() or ""
+    operator_id = get_operator_id() or ""
     payload = {"event": event_type, "session_id": session_id, **detail}
     if rid:
         payload["request_id"] = rid
+    if operator_id:
+        payload["operator_id"] = operator_id
     _AUDIT_LOGGER.info(json.dumps(payload, ensure_ascii=False, default=str))
 
     try:

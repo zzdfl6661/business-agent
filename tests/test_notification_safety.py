@@ -9,7 +9,9 @@ from integrations.dingtalk_dws import DingTalkDWSHostClient, DingTalkDWSError
 from integrations.dingtalk_mcp import DingTalkMCPClient
 from services.contacts import _read_rows, _resolve_store, preview_contact_import
 from services.notifications import (
+    _dispatch_key,
     confirm_notification_plan,
+    update_notification_text,
     validate_message_text,
     validate_notification_facts,
 )
@@ -195,12 +197,14 @@ def test_official_stdio_adapter_uses_robot_single_chat_schema(monkeypatch):
 
 def test_live_send_is_fixed_to_configured_zhu_user(monkeypatch):
     import services.notifications as notices
+    from database.models import NotificationDispatchOutbox
 
     plan = SimpleNamespace(
         plan_id="notice_live", analysis_run_id="run_1", session_id="session_1", store_id=1,
         intended_recipient="某门店店长", effective_recipient="朱兴福", message_text="GMV 1200 元\n1. 核查现场",
-        status="pending_approval", idempotency_key="live-idempotency-key", result_detail=None,
-        created_at=None, approved_at=None, dispatched_at=None,
+        status="pending_approval", version=1, idempotency_key="create-idempotency-key",
+        dispatch_idempotency_key=None, result_detail=None, approved_by=None, cancelled_by=None,
+        last_request_id=None, created_at=None, approved_at=None, dispatched_at=None,
     )
     sent = []
 
@@ -209,7 +213,35 @@ def test_live_send_is_fixed_to_configured_zhu_user(monkeypatch):
             sent.append((user_id, text, idempotency_key))
             return {"ok": True}
 
-    session = SimpleNamespace(commit=lambda: None)
+    class _ScalarResult:
+        def __init__(self, value):
+            self.value = value
+
+        def scalars(self):
+            return self
+
+        def first(self):
+            return self.value
+
+    class _Session:
+        outbox = None
+
+        def execute(self, statement):
+            entity = statement.column_descriptions[0].get("entity")
+            if entity is NotificationDispatchOutbox:
+                return _ScalarResult(self.outbox)
+            raise AssertionError(f"unexpected query: {statement}")
+
+        def add(self, row):
+            self.outbox = row
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    session = _Session()
     monkeypatch.setattr(notices, "get_notification_plan", lambda *_: plan)
     monkeypatch.setattr(notices, "_analysis_payload_for_plan", lambda *_: {"metrics": ["GMV 1200 元"]})
     monkeypatch.setattr(notices, "DingTalkDWSHostClient", _Client)
@@ -221,7 +253,36 @@ def test_live_send_is_fixed_to_configured_zhu_user(monkeypatch):
 
     result = confirm_notification_plan("notice_live", session)
     assert result["status"] == "sent"
-    assert sent == [("zhuxingfu-id", plan.message_text, plan.idempotency_key)]
+    assert plan.dispatch_idempotency_key == _dispatch_key(plan.plan_id)
+    assert plan.dispatch_idempotency_key != plan.idempotency_key
+    assert session.outbox.status == "sent"
+    assert session.outbox.attempts == 1
+    assert sent == [("zhuxingfu-id", plan.message_text, plan.dispatch_idempotency_key)]
+
+
+def test_edit_uses_optimistic_version_and_rejects_stale_page(monkeypatch):
+    import services.notifications as notices
+
+    plan = SimpleNamespace(
+        plan_id="notice_version", analysis_run_id="run_1", session_id="session_1", store_id=1,
+        intended_recipient="店长", effective_recipient="测试人", message_text="GMV 1200 元",
+        status="pending_approval", version=3, result_detail=None, approved_by=None,
+        cancelled_by=None, last_request_id=None, created_at=None, approved_at=None, dispatched_at=None,
+    )
+    locked = []
+    monkeypatch.setattr(
+        notices, "get_notification_plan",
+        lambda _plan_id, _session, for_update=False: locked.append(for_update) or plan,
+    )
+    monkeypatch.setattr(notices, "_analysis_payload_for_plan", lambda *_: {"metrics": ["GMV 1200 元"]})
+    session = SimpleNamespace(commit=lambda: None)
+
+    with pytest.raises(ValueError, match="当前版本 3"):
+        update_notification_text(
+            "notice_version", "GMV 1200 元", session, expected_version=2
+        )
+    assert locked == [True]
+    assert plan.message_text == "GMV 1200 元"
 
 
 def test_dws_host_client_rejects_unconfigured_or_mismatched_recipient(monkeypatch):

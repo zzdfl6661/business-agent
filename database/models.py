@@ -410,7 +410,7 @@ class StoreContact(TimestampMixin, Base):
 
 
 class NotificationPlan(TimestampMixin, Base):
-    """店长沟通草稿与授权状态机；第一阶段只允许 simulated。"""
+    """店长沟通草稿与授权状态机；审批事实独立于 LangGraph 生命周期。"""
 
     __tablename__ = "notification_plans"
     __table_args__ = (
@@ -427,10 +427,42 @@ class NotificationPlan(TimestampMixin, Base):
     effective_recipient: Mapped[str] = mapped_column(String(128), nullable=False)
     message_text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), index=True, nullable=False, default="pending_approval")
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default="1")
+    # 创建幂等键防止重复草稿；发送幂等键独立，避免编辑草稿改变创建语义。
     idempotency_key: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
+    dispatch_idempotency_key: Mapped[str | None] = mapped_column(String(96), unique=True)
     result_detail: Mapped[str | None] = mapped_column(Text)
+    approved_by: Mapped[str | None] = mapped_column(String(128))
+    cancelled_by: Mapped[str | None] = mapped_column(String(128))
+    last_request_id: Mapped[str | None] = mapped_column(String(64), index=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class NotificationDispatchOutbox(TimestampMixin, Base):
+    """通知发送 Outbox；审批事务提交后再执行外部调用，可审计、可重试。"""
+
+    __tablename__ = "notification_dispatch_outbox"
+    __table_args__ = (
+        Index("ix_notification_outbox_status_created", "status", "created_at"),
+        Index("ix_notification_outbox_plan", "plan_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    dispatch_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    plan_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("notification_plans.plan_id", ondelete="CASCADE"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    request_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    operator_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    response_detail: Mapped[str | None] = mapped_column(Text)
 
 
 class AuditLog(TimestampMixin, Base):
