@@ -118,6 +118,41 @@ def _apply_lightweight_migrations() -> None:
                 conn.execute(text(f"ALTER TABLE data_snapshots DROP INDEX `{name}`"))
                 break
 
+        notification_cols = {c["name"] for c in inspector.get_columns("notification_plans")}
+        notification_additions = {
+            "version": "BIGINT NOT NULL DEFAULT 1",
+            "dispatch_idempotency_key": "VARCHAR(96) NULL",
+            "approved_by": "VARCHAR(128) NULL",
+            "cancelled_by": "VARCHAR(128) NULL",
+            "last_request_id": "VARCHAR(64) NULL",
+        }
+        for column, ddl in notification_additions.items():
+            if column not in notification_cols:
+                conn.execute(text(f"ALTER TABLE notification_plans ADD COLUMN {column} {ddl}"))
+
+        notification_inspector = inspect(engine)
+        notification_indexes = notification_inspector.get_indexes("notification_plans")
+        notification_uniques = notification_inspector.get_unique_constraints("notification_plans")
+        has_dispatch_unique = any(
+            idx.get("unique") and idx.get("column_names") == ["dispatch_idempotency_key"]
+            for idx in notification_indexes
+        ) or any(
+            item.get("column_names") == ["dispatch_idempotency_key"]
+            for item in notification_uniques
+        )
+        if not has_dispatch_unique:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX ux_notification_dispatch_idempotency "
+                "ON notification_plans (dispatch_idempotency_key)"
+            ))
+        has_request_index = any(
+            idx.get("column_names") == ["last_request_id"] for idx in notification_indexes
+        )
+        if not has_request_index:
+            conn.execute(text(
+                "CREATE INDEX ix_notification_last_request_id ON notification_plans (last_request_id)"
+            ))
+
 
 def get_session():
     """FastAPI 依赖注入：提供 Session 作用域。"""

@@ -89,6 +89,11 @@ class ExecuteConfirmRequest(BaseModel):
 
 class NotificationEditRequest(BaseModel):
     message_text: str = Field(..., min_length=1, max_length=1200)
+    expected_version: int = Field(..., ge=1, description="前端读取草稿时的版本号，用于防止并发覆盖")
+
+
+class NotificationActionRequest(BaseModel):
+    expected_version: int = Field(..., ge=1, description="前端读取草稿时的版本号，用于并发状态迁移")
 
 
 def _sum_usage(result: dict) -> dict:
@@ -373,9 +378,9 @@ def _build_trace(result: dict) -> list[dict]:
 async def chat(req: ChatRequest) -> ChatResponse:
     """自然语言 → 经营诊断报告（支持 session_id 持久化 + 审计日志）。"""
     # #8：request_id 贯穿全链路（日志 formatter + 审计 payload + 前端 trace）
-    from config.request_id import new_request_id, set_request_id
+    from config.request_id import get_request_id, new_request_id, set_request_id
 
-    request_id = new_request_id()
+    request_id = get_request_id() or new_request_id()
     set_request_id(request_id)
 
     question = req.question.strip()
@@ -498,7 +503,7 @@ async def chat_stream(req: ChatRequest):
     # #8：request_id 贯穿（SSE done 事件回传，前端 trace 可展示）
     from config.request_id import get_request_id, new_request_id, set_request_id
 
-    request_id = new_request_id()
+    request_id = get_request_id() or new_request_id()
     set_request_id(request_id)
 
     question = req.question.strip()
@@ -706,31 +711,46 @@ def notifications_edit(plan_id: str, req: NotificationEditRequest) -> dict:
 
     try:
         with get_session_factory()() as session:
-            return {"success": True, "plan": update_notification_text(plan_id, req.message_text, session)}
+            return {
+                "success": True,
+                "plan": update_notification_text(
+                    plan_id, req.message_text, session, expected_version=req.expected_version
+                ),
+            }
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
 
 
 @router.post("/notifications/{plan_id}/confirm")
-def notifications_confirm(plan_id: str) -> dict:
+def notifications_confirm(plan_id: str, req: NotificationActionRequest) -> dict:
     from integrations.dingtalk_dws import DingTalkDWSError
     from integrations.dingtalk_mcp import DingTalkMCPError
     from services.notifications import confirm_notification_plan
 
     try:
         with get_session_factory()() as session:
-            return {"success": True, "plan": confirm_notification_plan(plan_id, session)}
+            return {
+                "success": True,
+                "plan": confirm_notification_plan(
+                    plan_id, session, expected_version=req.expected_version
+                ),
+            }
     except (ValueError, DingTalkDWSError, DingTalkMCPError) as exc:
         return {"success": False, "error": str(exc)}
 
 
 @router.post("/notifications/{plan_id}/cancel")
-def notifications_cancel(plan_id: str) -> dict:
+def notifications_cancel(plan_id: str, req: NotificationActionRequest) -> dict:
     from services.notifications import cancel_notification_plan
 
     try:
         with get_session_factory()() as session:
-            return {"success": True, "plan": cancel_notification_plan(plan_id, session)}
+            return {
+                "success": True,
+                "plan": cancel_notification_plan(
+                    plan_id, session, expected_version=req.expected_version
+                ),
+            }
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
 

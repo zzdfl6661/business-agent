@@ -901,6 +901,7 @@ function renderNotifications(container, plans) {
   for (const p of plans) {
     const card = document.createElement('div');
     card.className = 'plan-card';
+    card.dataset.version = String(p.version || 1);
     card.innerHTML = `
       <div class="plan-line">原定收件人：<b>${escapeHtml(p.intended_recipient)}</b> · 本次实际接收人（测试）：<b>${escapeHtml(p.effective_recipient)}</b></div>
       <textarea class="notification-text" maxlength="1200">${escapeHtml(p.message_text || '')}</textarea>
@@ -924,10 +925,14 @@ async function saveNotification(planId, btn) {
   try {
     const resp = await apiFetch('/api/notifications/' + encodeURIComponent(planId), {
       method: 'PATCH', headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ message_text: messageText })
+      body: JSON.stringify({
+        message_text: messageText,
+        expected_version: Number(card.dataset.version || '1')
+      })
     });
     const d = await resp.json();
     if (!d.success) throw new Error(d.error || '保存失败');
+    card.dataset.version = String((d.plan && d.plan.version) || card.dataset.version);
     info.textContent = '✅ 草稿已保存'; info.className = 'plan-result ok';
   } catch (e) {
     info.textContent = '❌ ' + e.message; info.className = 'plan-result err';
@@ -941,7 +946,8 @@ async function confirmNotification(planId, btn) {
   try {
     const resp = await apiFetch('/api/notifications/' + encodeURIComponent(planId) + '/confirm', {
       method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' })
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ expected_version: Number(card.dataset.version || '1') })
     });
     let d;
     try {
@@ -952,11 +958,18 @@ async function confirmNotification(planId, btn) {
     }
     if (d.success) {
       const plan = d.plan || {};
-      info.textContent = `✅ 已${plan.status === 'simulated' ? '模拟发送' : '发送'}：${plan.effective_recipient || ''}`;
-      info.className = 'plan-result ok';
-      btn.style.display = 'none';
-      card.querySelectorAll('.plan-btns .wf-btn').forEach(b => b.style.display = 'none');
-      card.querySelector('.notification-text').disabled = true;
+      card.dataset.version = String(plan.version || card.dataset.version);
+      if (plan.status === 'simulated' || plan.status === 'sent') {
+        info.textContent = `✅ 已${plan.status === 'simulated' ? '模拟发送' : '发送'}：${plan.effective_recipient || ''}`;
+        info.className = 'plan-result ok';
+        btn.style.display = 'none';
+        card.querySelectorAll('.plan-btns .wf-btn').forEach(b => b.style.display = 'none');
+        card.querySelector('.notification-text').disabled = true;
+      } else {
+        info.textContent = '⏳ 发送任务已被其他请求处理，请稍后重试查询结果';
+        info.className = 'plan-result';
+        btn.disabled = false; btn.textContent = '查询发送结果';
+      }
     } else {
       info.textContent = '❌ ' + (d.error || d.detail || '发送失败');
       info.className = 'plan-result err';
@@ -974,7 +987,8 @@ async function cancelNotification(planId, btn) {
   const info = card.querySelector('.plan-result');
   try {
     const resp = await apiFetch('/api/notifications/' + encodeURIComponent(planId) + '/cancel', {
-      method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' })
+      method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ expected_version: Number(card.dataset.version || '1') })
     });
     const d = await resp.json();
     if (!d.success) throw new Error(d.error || '取消失败');
